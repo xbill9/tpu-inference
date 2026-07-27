@@ -20,8 +20,7 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run"
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -100,8 +99,7 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
-        "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run"
+        "MODEL_NAME": "DeepSeek-R1"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -182,8 +180,7 @@
         "OUTPUT_LEN": 1024,
         "PREFIX_LEN": 0,
         "MODEL_NAME": "DeepSeek-R1",
-        "DEVICE": "tpu7x-16",
-        "USER": "for test run"
+        "DEVICE": "tpu7x-16"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -248,8 +245,7 @@
         "OUTPUT_LEN": 8192,
         "PREFIX_LEN": 0,
         "MODEL_NAME": "Qwen3-Coder-480B-A35B-Instruct",
-        "DEVICE": "tpu7x-16",
-        "USER": "for test run"
+        "DEVICE": "tpu7x-16"
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -308,7 +304,6 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run",
         "UPLOAD_DB": "false",
         "TENSOR_PARALLEL_SIZE": 16
       },
@@ -377,7 +372,6 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run",
         "UPLOAD_DB": "false",
         "TENSOR_PARALLEL_SIZE": 16
       },
@@ -446,7 +440,6 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run",
         "UPLOAD_DB": "false",
         "TENSOR_PARALLEL_SIZE": 16
       },
@@ -516,7 +509,6 @@
         "PREFIX_LEN": 0,
         "DEVICE": "tpu7x-16",
         "MODEL_NAME": "DeepSeek-R1",
-        "USER": "for test run",
         "UPLOAD_DB": "false",
         "TENSOR_PARALLEL_SIZE": 16
       },

@@ -333,6 +333,11 @@ class VllmSampler:
     """Purges KV-cache and prefix caching blocks from HBM."""
     logger.info("Clearing vLLM PagedAttention KV cache and prefix cache...")
     self._kv_cache_valid = False
+    # Explicitly clear KV cache using tpu-inference TPUWorker method
+    for w in self._get_tpu_workers():
+      if hasattr(w, "delete_kv_cache"):
+        w.delete_kv_cache()
+
     if self._engine and hasattr(self._engine, "reset_prefix_cache"):
       await self._engine.reset_prefix_cache()
     self._kv_cache_valid = True

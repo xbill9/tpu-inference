@@ -29,10 +29,16 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.auto_awq import \
-    AutoAWQConfig as AWQConfig
-from vllm.model_executor.layers.quantization.auto_awq import \
-    AutoAWQLinearMethod as AWQLinearMethod
+# Backward compatibility fallback for AWQ quantization imports across vLLM versions:
+# Upstream vLLM package reorganizations around v0.22.x renamed/relocated the AWQ quantization module
+# (moving `AWQConfig` and `AWQLinearMethod` between `vllm.model_executor.layers.quantization.auto_awq` and `.awq`).
+# This try-except block allows tpu-inference to maintain compatibility across both legacy and updated
+# vLLM runtime environments.
+# Safe removal condition: Can be safely removed when vLLM release dependencies are unified upstream across all environments.
+try:
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig as AWQConfig, AutoAWQLinearMethod as AWQLinearMethod
+except ModuleNotFoundError:
+    from vllm.model_executor.layers.quantization.awq import AWQConfig, AWQLinearMethod
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import \

@@ -157,6 +157,10 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
     mock_engine.pause_background_loop = AsyncMock()
     mock_engine.resume_background_loop = AsyncMock()
     mock_engine.reset_prefix_cache = AsyncMock()
+    mock_engine.init_weight_transfer_engine = MagicMock()
+    mock_engine.start_weight_update = MagicMock()
+    mock_engine.update_weights = MagicMock()
+    mock_engine.finish_weight_update = MagicMock()
     sampler._engine = mock_engine
     sampler._is_running = True
 
@@ -169,18 +173,15 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
       )
       await sampler.pre_weight_sync(req_pre)
       mock_engine.pause_background_loop.assert_called_once()
-      mock_worker_0.start_weight_update.assert_called_once_with(free_kv_cache=True)
-      mock_worker_1.start_weight_update.assert_called_once_with(free_kv_cache=True)
+      mock_engine.start_weight_update.assert_called_once_with(free_kv_cache=True)
 
       req_sync = {"extra_config": {"dma_channel": 1}}
       await sampler.weight_sync(req_sync)
-      mock_worker_0.update_weights.assert_called_once_with({"dma_channel": 1})
-      mock_worker_1.update_weights.assert_called_once_with({"dma_channel": 1})
+      mock_engine.update_weights.assert_called_once_with({"dma_channel": 1})
 
       req_post = SimpleNamespace(req_id="transfer_99")
       await sampler.post_weight_sync(req_post)
-      mock_worker_0.finish_weight_update.assert_called_once()
-      mock_worker_1.finish_weight_update.assert_called_once()
+      mock_engine.finish_weight_update.assert_called_once()
       mock_engine.reset_prefix_cache.assert_called_once()
       mock_engine.resume_background_loop.assert_called_once()
       self.assertEqual(await sampler.get_transfer_status("transfer_99"), "SUCCESS")
@@ -223,6 +224,8 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
       mock_engine.resume_background_loop.assert_called_once()
 
     asyncio.run(run_lifecycle_test())
+
+
 
 
 if __name__ == "__main__":

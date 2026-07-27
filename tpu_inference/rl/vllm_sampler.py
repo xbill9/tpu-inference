@@ -125,9 +125,8 @@ class VllmSampler:
         "model_path": self.config.model_path,
         "tp_size": self.config.tensor_parallel_size,
     }
-    for w in self._get_tpu_workers():
-      if hasattr(w, "init_weight_transfer_engine"):
-        w.init_weight_transfer_engine(init_info)
+    if self._engine:
+      self._engine.init_weight_transfer_engine(init_info)
 
     logger.info("VllmSampler started successfully.")
 
@@ -377,9 +376,8 @@ class VllmSampler:
     await self.pause()
     await self.clear_cache()
 
-    for w in self._get_tpu_workers():
-      if hasattr(w, "start_weight_update"):
-        w.start_weight_update(free_kv_cache=free_kv_cache)
+    if self._engine:
+      self._engine.start_weight_update(free_kv_cache=free_kv_cache)
 
     self._kv_cache_valid = False
 
@@ -392,9 +390,8 @@ class VllmSampler:
     """Phase 2: Calls TPUWorker.update_weights(update_info)."""
     logger.info("Executing weight_sync update on TPU workers...")
     u_info = update_info or _get_val(sync_request, "extra_config") or {}
-    for w in self._get_tpu_workers():
-      if hasattr(w, "update_weights"):
-        w.update_weights(u_info)
+    if self._engine:
+      self._engine.update_weights(u_info)
     await asyncio.sleep(0.01)
 
   async def post_weight_sync(
@@ -409,9 +406,8 @@ class VllmSampler:
       rid = rid or _get_val(sync_request, "req_id")
     logger.info("Executing post_weight_sync (req_id=%s)...", rid)
 
-    for w in self._get_tpu_workers():
-      if hasattr(w, "finish_weight_update"):
-        w.finish_weight_update()
+    if self._engine:
+      self._engine.finish_weight_update()
 
     self._kv_cache_valid = True
     if rid:

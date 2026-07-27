@@ -83,7 +83,6 @@ class VllmSampler:
     self._mesh: Any | None = None
     self._dst_controller_id = f"raiden_dst_{id(self)}"
     self._dst_controller_ip = "127.0.0.1"
-    self._src_controller_ip: str | None = None
     self._transfer_statuses: dict[str, str] = {}
     self._policy_version = 0
 
@@ -372,14 +371,8 @@ class VllmSampler:
       **kwargs: Any,
   ) -> None:
     """Phase 1: Pauses intake, resets prefix cache, and calls start_weight_update()."""
-    ip = _get_val(sync_request, "src_controller_ip", "") or _get_val(sync_request, "controller_id", "") or "10.0.0.1"
-    cid = _get_val(sync_request, "controller_id", "")
     self._policy_version = _get_val(sync_request, "policy_version", self._policy_version)
-
-    logger.info("Executing pre_weight_sync from Trainer IP: %s (policy_version=%d)", ip, self._policy_version)
-    self._src_controller_ip = ip
-    if cid:
-      self._dst_controller_id = cid
+    logger.info("Executing pre_weight_sync (policy_version=%d)", self._policy_version)
 
     await self.pause()
     await self.clear_cache()
@@ -397,7 +390,7 @@ class VllmSampler:
       **kwargs: Any,
   ) -> None:
     """Phase 2: Calls TPUWorker.update_weights(update_info)."""
-    logger.info("Executing weight_sync DMA from controller: %s", self._src_controller_ip)
+    logger.info("Executing weight_sync update on TPU workers...")
     u_info = update_info or _get_val(sync_request, "extra_config") or {}
     for w in self._get_tpu_workers():
       if hasattr(w, "update_weights"):

@@ -148,6 +148,8 @@ class VllmSampler:
       return
     logger.info("Pausing VllmSampler inference intake for weight sync...")
     self._is_paused = True
+    # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
+    # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
     if self._engine and hasattr(self._engine, "pause_background_loop"):
       await self._engine.pause_background_loop()
     await asyncio.sleep(0.01)
@@ -182,11 +184,10 @@ class VllmSampler:
         top_k=_get_val(sparams, "top_k", -1),
         max_tokens=_get_val(sparams, "max_tokens", defaults["max_tokens"]),
         stop=_get_val(sparams, "stop_sequences") or _get_val(sparams, "stop") or None,
-        prompt_logprobs=1 if _get_val(sparams, "return_logprobs", defaults["return_logprobs"]) else None,
         logprobs=1 if _get_val(sparams, "return_logprobs", defaults["return_logprobs"]) else None,
     )
 
-  async def _process_stream_output(
+  async def _process_request_output(
       self,
       req_id: str,
       route_key: str | None,
@@ -287,6 +288,7 @@ class VllmSampler:
           {
               "prompt": item,
               "request_id": f"req_{idx}_{time.time_ns()}",
+              # route_key is used by the rollout manager to talk to a specific remote sampler
               "route_key": kwargs.get("route_key"),
           }
           for idx, item in enumerate(items)
@@ -300,10 +302,10 @@ class VllmSampler:
         "max_tokens": kwargs.get("max_tokens", 128),
         "temperature": kwargs.get("temperature", 0.7),
         "top_p": kwargs.get("top_p", 0.95),
-        "return_logprobs": kwargs.get("return_logprobs", True),
+        "return_logprobs": kwargs.get("return_logprobs", False),
     }
 
-    stream_tasks = []
+    pending_tasks = []
     for idx, req in enumerate(req_list):
       vllm_params = self._build_vllm_params(req, defaults)
       route_key = _get_val(req, "route_key")
@@ -312,11 +314,11 @@ class VllmSampler:
       prompt_text = prompt_val if isinstance(prompt_val, str) else str(prompt_val)
 
       task_gen = self._engine.generate(prompt_text, vllm_params, request_id=req_id)
-      stream_tasks.append((req_id, route_key, task_gen))
+      pending_tasks.append((req_id, route_key, task_gen))
 
     results = await asyncio.gather(*[
-        self._process_stream_output(req_id, route_key, task_gen)
-        for req_id, route_key, task_gen in stream_tasks
+        self._process_request_output(req_id, route_key, task_gen)
+        for req_id, route_key, task_gen in pending_tasks
     ])
 
     if raw_input_mode:
@@ -341,45 +343,34 @@ class VllmSampler:
 
   async def get_weight_sync_metadata(self, **kwargs: Any) -> dict[str, Any]:
     """Returns PyTree of weight sharding rules, dtype, and shape across devices."""
-    return {
-        "sharding": f"{self.config.tensor_parallel_size}x{self.config.data_parallel_size}",
-        "dtype": self.config.weight_dtype,
-        "model_path": self.config.model_path,
-        "policy_version": self._policy_version,
-        "layers_valid": self._kv_cache_valid,
-    }
+    return self.get_weight_metadata()
 
   def get_weight_metadata(self) -> dict[str, Any]:
     """Synchronous alias for get_weight_sync_metadata."""
+    worker_ips = [
+        getattr(w, "ip_address", getattr(w, "ip", "127.0.0.1"))
+        for w in self._get_tpu_workers()
+    ]
     return {
         "sharding": f"{self.config.tensor_parallel_size}x{self.config.data_parallel_size}",
         "dtype": self.config.weight_dtype,
         "model_path": self.config.model_path,
         "policy_version": self._policy_version,
         "layers_valid": self._kv_cache_valid,
+        "tpu_worker_ips": worker_ips,
     }
 
   async def pre_weight_sync(
       self,
       sync_request: Any = None,
-      src_controller_ip: str | None = None,
-      dst_controller_id: str | None = None,
       free_kv_cache: bool = True,
       **kwargs: Any,
   ) -> None:
     """Phase 1: Pauses intake, resets prefix cache, and calls start_weight_update()."""
-    ip = src_controller_ip
-    cid = dst_controller_id
-    if sync_request is not None:
-      ip = (
-          ip
-          or _get_val(sync_request, "src_controller_ip", "")
-          or _get_val(sync_request, "controller_id", "")
-      )
-      cid = cid or _get_val(sync_request, "controller_id")
-      self._policy_version = _get_val(sync_request, "policy_version", self._policy_version)
+    ip = _get_val(sync_request, "src_controller_ip", "") or _get_val(sync_request, "controller_id", "") or "10.0.0.1"
+    cid = _get_val(sync_request, "controller_id", "")
+    self._policy_version = _get_val(sync_request, "policy_version", self._policy_version)
 
-    ip = ip or "10.0.0.1"
     logger.info("Executing pre_weight_sync from Trainer IP: %s (policy_version=%d)", ip, self._policy_version)
     self._src_controller_ip = ip
     if cid:

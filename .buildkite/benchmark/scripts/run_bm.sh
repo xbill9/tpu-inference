@@ -395,7 +395,7 @@ if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" && "${IS_MULTI_HOST_BENCH:-false}" =
     echo "Syncing generation configs for DeepSeek-R1"
     GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
     mkdir -p "$GENERATION_CONFIG_FOLDER"
-    gsutil -m cp -r gs://gpolovets-inference/deepseek/generation_configs/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+    gsutil -m cp -r gs://tpu-commons-ci/deepseek/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
   else
     echo "Warning: gsutil not found. Skipping DeepSeek-R1 generation configs download from GCS."
   fi

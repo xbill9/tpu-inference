@@ -21,17 +21,17 @@ import sys
 def parse_benchmark_log(log_path, result_path):
     # Mapping of what vllm prints vs what Spanner column expects
     METRIC_MAPPING = {
-        "Request throughput": "Throughput",
-        "Output token throughput": "OutputTokenThroughput",
-        "Total token throughput": "TotalTokenThroughput",
-        "Median TTFT": "MedianTTFT",
-        "P99 TTFT": "P99TTFT",
-        "Median TPOT": "MedianTPOT",
-        "P99 TPOT": "P99TPOT",
-        "Median ITL": "MedianITL",
-        "P99 ITL": "P99ITL",
-        "Median E2EL": "MedianETEL",
-        "P99 E2EL": "P99ETEL"
+        "request throughput": "Throughput",
+        "output token throughput": "OutputTokenThroughput",
+        "total token throughput": "TotalTokenThroughput",
+        "median ttft": "MedianTTFT",
+        "p99 ttft": "P99TTFT",
+        "median tpot": "MedianTPOT",
+        "p99 tpot": "P99TPOT",
+        "median itl": "MedianITL",
+        "p99 itl": "P99ITL",
+        "median e2el": "MedianETEL",
+        "p99 e2el": "P99ETEL"
     }
 
     results = {}
@@ -61,7 +61,7 @@ def parse_benchmark_log(log_path, result_path):
                     val = val.strip()
 
                     # Remove units like (ms) or (tok/s) or (req/s)
-                    clean_key = re.sub(r"\(.*?\)", "", key).strip()
+                    clean_key = re.sub(r"\(.*?\)", "", key).strip().lower()
 
                     if clean_key in METRIC_MAPPING and METRIC_MAPPING[
                             clean_key] not in results:

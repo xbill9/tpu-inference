@@ -54,6 +54,7 @@ CASE_FILE="$1"
 TARGET_CASE_NAME=${2:-""}
 VLLM_PID=""
 CLEANUP_DONE="false"
+BENCHMARK_TIMEOUT="${BENCHMARK_TIMEOUT:-2h}"
 
 if [ -z "$CASE_FILE" ] || [ -z "$TARGET_CASE_NAME" ]; then
     echo "Usage: $0 <case.json> <TARGET_CASE_NAME>"
@@ -179,7 +180,17 @@ run_accuracy_if_needed() {
     fi
 
     echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."
-    if ! "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1; then
+    set +e
+    timeout "$BENCHMARK_TIMEOUT" "${ACCURACY_CMD[@]}" >> "$BM_LOG" 2>&1
+    local accuracy_exit_code=$?
+    set -e
+
+    if [[ "$accuracy_exit_code" -eq 124 ]]; then
+      echo "[ERROR] Accuracy benchmark timed out after $BENCHMARK_TIMEOUT."
+      echo "--- Dumping BM_LOG for debugging ---"
+      tail -n 100 "$BM_LOG"
+      report_and_exit 1
+    elif [[ "$accuracy_exit_code" -ne 0 ]]; then
       echo "[ERROR] Accuracy benchmark failed during execution."
       echo "--- Dumping BM_LOG for debugging ---"
       tail -n 100 "$BM_LOG"
@@ -550,12 +561,12 @@ if [[ "$SERVER_ALREADY_RUNNING" == "false" ]]; then
       
       echo "[DEBUG] WARMUP_CMD: ${CLIENT_CMD_ENVS[*]} ${WARMUP_CMD[*]}"
       set +e
-      timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
+      timeout "$BENCHMARK_TIMEOUT" env "${CLIENT_CMD_ENVS[@]}" "${WARMUP_CMD[@]}" > "$LOG_FOLDER/warmup_log.txt" 2>&1
       warmup_exit_code=$?
       set -e
       
       if [[ "$warmup_exit_code" -eq 124 ]]; then
-          echo "[ERROR] Warmup phase timed out after 2 hours!"
+          echo "[ERROR] Warmup phase timed out after $BENCHMARK_TIMEOUT!"
           echo "--- Dumping Warmup Log ---"
           cat "$LOG_FOLDER/warmup_log.txt"
           exit 1
@@ -620,12 +631,12 @@ run_benchmark(){
   echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   set +e
   # Execute the array directly, preserving strict argument boundaries
-  timeout 2h env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  timeout "$BENCHMARK_TIMEOUT" env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
   local client_exit_code=$?
   set -e
 
   if [ $client_exit_code -eq 124 ]; then
-    echo "[ERROR] Client command timed out after 2 hours." >&2
+    echo "[ERROR] Client command timed out after $BENCHMARK_TIMEOUT." >&2
     echo "--- Dumping BM_LOG for debugging ---" >&2
     cat "$BM_LOG" >&2
     return $client_exit_code

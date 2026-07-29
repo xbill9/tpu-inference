@@ -418,7 +418,7 @@ if [[ "${VLLM_SERVE_CMD}" =~ --generation-config[=\ ]+gs://([^ ]+) ]]; then
     echo "--- Detected GCS generation-config: $gcs_path"
     echo "--- Pre-downloading config to workspace inside container..."
 
-    download_cmd="if ! command -v gsutil &> /dev/null; then curl -sSL https://sdk.cloud.google.com | bash -s -- --disable-prompts > /dev/null; export PATH=\"\$PATH:/root/google-cloud-sdk/bin\"; fi && mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
+    download_cmd="mkdir -p /workspace && gsutil -m cp -r ${config_url} /workspace/ && "
     
     VLLM_SERVE_CMD=$(echo "${VLLM_SERVE_CMD}" | sed -E "s|--generation-config[=\ ]+gs://[^ ]+|--generation-config /workspace/${config_dir_name}/${config_file_name}|g")
     VLLM_SERVE_CMD="${download_cmd}${VLLM_SERVE_CMD}"

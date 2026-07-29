@@ -147,25 +147,35 @@ run_accuracy_if_needed() {
   if [[ ${#ACCURACY_CMD[@]} -gt 0 ]]; then
     echo ""
     echo "====================================================================="
-    echo "[INFO] RUN_ACCURACY=mmlu: Executing Accuracy Verification Phase"
+    echo "[INFO] Executing Accuracy Verification Phase"
     echo "====================================================================="
 
-    # Download dataset using wget if it is not present in the workspace
-    DATASET_DIR="/workspace/mmlu"
-    if [ ! -d "$DATASET_DIR/data/test" ]; then
-      echo "MMLU dataset test folder not found, downloading via wget..."
-      mkdir -p "$DATASET_DIR"
-      cd "$DATASET_DIR" || exit 1
-      if [ ! -f data.tar ]; then
-        echo "Downloading data.tar..."
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -P .
+    local needs_mmlu=false
+    for arg in "${ACCURACY_CMD[@]}"; do
+      if [[ "$arg" == *"mmlu"* ]]; then
+        needs_mmlu=true
+        break
       fi
-      if [ ! -d "data/test" ]; then
-        echo "Extracting data.tar..."
-        tar -xf data.tar
+    done
+
+    if [[ "$needs_mmlu" == "true" ]]; then
+      # Download dataset using wget if it is not present in the workspace
+      DATASET_DIR="/workspace/mmlu"
+      if [ ! -d "$DATASET_DIR/data/test" ]; then
+        echo "MMLU dataset test folder not found, downloading via wget..."
+        mkdir -p "$DATASET_DIR"
+        cd "$DATASET_DIR" || report_and_exit 1
+        if [ ! -f data.tar ]; then
+          echo "Downloading data.tar..."
+          wget --tries=3 --timeout=15 https://people.eecs.berkeley.edu/~hendrycks/data.tar -P . || report_and_exit 1
+        fi
+        if [ ! -d "data/test" ]; then
+          echo "Extracting data.tar..."
+          tar -xf data.tar || report_and_exit 1
+        fi
+        # Return to previous directory
+        cd - > /dev/null
       fi
-      # Return to previous directory
-      cd - > /dev/null
     fi
 
     echo "Running accuracy benchmark using JSON configured ACCURACY_CMD..."

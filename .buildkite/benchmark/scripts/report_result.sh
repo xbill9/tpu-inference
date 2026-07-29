@@ -153,11 +153,6 @@ else
   echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
 fi
 
-if [ "$EXIT_CODE" -ne 0 ]; then
-  echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping metric parsing, DB reporting, and MLCompass export."
-  exit 0
-fi
-
 (
   if [ "${BUILDKITE:-false}" == "true" ]; then
     ENV_CONTEXT="Buildkite environment"
@@ -178,6 +173,8 @@ fi
 
   # Use unified Python script to parse all metrics from the log
   python3 "$(dirname "$0")/parse_benchmark_log.py" "$BM_LOG" "$RESULT_FILE" || true
+
+  if [ "$EXIT_CODE" -eq 0 ]; then
 
   if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
     # Accuracy run logic validation
@@ -213,6 +210,9 @@ fi
     if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
       echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
     fi
+  fi
+  else
+    echo "--- Skipping metric validation because EXIT_CODE ($EXIT_CODE) indicates failure."
   fi
 )
 
@@ -281,7 +281,9 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
           insert_vals+=", $val_str"
           # Use excluded keyword to refer to the proposed insert value
           update_metrics+=", ${key}=excluded.${key}"
-          FINAL_STATUS="COMPLETED"
+          if [ "$EXIT_CODE" -eq 0 ]; then
+              FINAL_STATUS="COMPLETED"
+          fi
       done < "$RESULT_FILE"
   fi
 

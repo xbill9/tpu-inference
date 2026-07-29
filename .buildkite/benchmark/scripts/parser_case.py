@@ -30,7 +30,8 @@ def export_env_if_valid(opts_dict, json_key, env_var_name):
 
     # Validate value: allow 0, but exclude None, empty dict, or empty string
     if val not in (None, {}, ""):
-        print(f"export {env_var_name}=\"{val}\"")
+        val_str = str(val).lower() if isinstance(val, bool) else val
+        print(f"export {env_var_name}=\"{val_str}\"")
 
 def normalize_device_name(device_name):
     """
@@ -194,7 +195,8 @@ def main():
 
     # Export environment variables securely
     for k, v in merged_env.items():
-        print(f"export {k}={shlex.quote(str(v))}")
+        v_str = str(v).lower() if isinstance(v, bool) else str(v)
+        print(f"export {k}={shlex.quote(v_str)}")
 
     srv_opts = case_data.get("server_command_options", {})
     cli_opts = case_data.get("client_command_options", {})
@@ -213,13 +215,13 @@ def main():
     export_env_if_valid(srv_opts, "max-model-len", "MAX_MODEL_LEN")
     cli_cmd_type = cli_opts.get("command_type", "vllm_bench_serve")
     cli_env = cli_opts.get("env", {}).copy()
-    cli_env_parts = [f"{k}={v}" for k, v in cli_env.items()]
+    cli_env_parts = [f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in cli_env.items()]
     quoted_cli_env = ' '.join(shlex.quote(p) for p in cli_env_parts)
     print(f"CLIENT_CMD_ENVS=({quoted_cli_env})")
     # CLIENT_CMD_ENVS_STR for lm_eval
     print(f"export CLIENT_CMD_ENVS_STR={shlex.quote(quoted_cli_env)}")
     srv_env = srv_opts.get("env", {})
-    srv_env_list = [f"{k}={v}" for k, v in srv_env.items()]
+    srv_env_list = [f"{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in srv_env.items()]
     srv_env_str = ' '.join(shlex.quote(item) for item in srv_env_list)
     print(f"SERVER_CMD_ENVS=({srv_env_str})")
 

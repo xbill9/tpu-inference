@@ -120,7 +120,7 @@ fi
 # -v HF_HOME: Mounts HuggingFace cache to avoid re-downloading models
 
 # Force cleanup of the image to ensure we pull the absolute latest
-if [[ "${IS_MULTI_HOST_BENCH,,}" != "true" ]]; then
+if [[ "${IS_MULTI_HOST_BENCH:-false}" != "true" ]]; then
     echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
     docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
     docker pull "${DOCKER_IMAGE}"

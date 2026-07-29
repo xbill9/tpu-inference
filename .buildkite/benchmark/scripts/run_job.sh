@@ -131,6 +131,7 @@ IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-false}"
 if [[ ( "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ) || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
     IS_MULTI_HOST_BENCH="true"
 fi
+export IS_MULTI_HOST_BENCH
 
 BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"

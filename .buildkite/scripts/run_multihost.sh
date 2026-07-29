@@ -272,6 +272,21 @@ if [ "$#" -ge 1 ]; then
         source "$TEMP_EXPORT_FILE"
         rm -f "$TEMP_EXPORT_FILE"
         
+        # Write GCS upload metadata variables to a temp file for run_job.sh
+        METADATA_FILE="/tmp/multihost_run_metadata.sh"
+        rm -f "$METADATA_FILE"
+        if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
+          {
+            echo "export MODEL_NAME='${MODEL_NAME:-}'"
+            echo "export INPUT_LEN='${INPUT_LEN:-}'"
+            echo "export OUTPUT_LEN='${OUTPUT_LEN:-}'"
+            echo "declare -a SERVER_CMD_ENVS=()"
+            for env_item in "${SERVER_CMD_ENVS[@]}"; do
+                echo "SERVER_CMD_ENVS+=('$(printf '%q' "$env_item")')"
+            done
+          } >> "$METADATA_FILE"
+        fi
+
         # Convert SERVER_CMD array to a single string VLLM_SERVE_CMD
         for env_item in "${SERVER_CMD_ENVS[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
@@ -465,17 +480,3 @@ fi
 
 echo "--- Tests completed successfully"
 
-# Write GCS upload metadata variables to a temp file for run_job.sh
-METADATA_FILE="/tmp/multihost_run_metadata.sh"
-rm -f "$METADATA_FILE"
-if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
-  {
-    echo "export MODEL_NAME='${MODEL_NAME:-}'"
-    echo "export INPUT_LEN='${INPUT_LEN:-}'"
-    echo "export OUTPUT_LEN='${OUTPUT_LEN:-}'"
-    echo "declare -a SERVER_CMD_ENVS=()"
-    for env_item in "${SERVER_CMD_ENVS[@]}"; do
-        echo "SERVER_CMD_ENVS+=('$(printf '%q' "$env_item")')"
-    done
-  } >> "$METADATA_FILE"
-fi

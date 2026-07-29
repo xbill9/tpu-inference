@@ -121,12 +121,12 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  rm -f /tmp/vllm_serve.log
   docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   if [[ -f /tmp/vllm_serve.log ]]; then
     echo "==================== START OF VLLM SERVE LOG ===================="
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
-    rm -f /tmp/vllm_serve.log
   fi
   rm -f "${TEMP_EXPORT_FILE:-}" >/dev/null 2>&1 || true
   docker stop node >/dev/null 2>&1 || true

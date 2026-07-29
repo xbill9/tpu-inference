@@ -260,8 +260,6 @@ def main():
             acc_cmd_type = acc_opts.get("command_type", "local_benchmark_serving")
             acc_resolved_args = resolve_device_args(acc_opts.get("args", {}), current_machine)
 
-            # If the user sets dataset-path with env var references like $DATASET_DIR/test,
-            # we need to be careful with shlex.quote. build_command already handles it but we should pass it correctly.
             acc_cmd = build_command(acc_cmd_type, acc_resolved_args)
             quoted_acc_cmd = ' '.join(
                 shlex.quote(arg) for arg in shlex.split(acc_cmd))

@@ -20,14 +20,11 @@ from dataclasses import asdict
 
 import jax
 import yaml
-from absl import flags
 
 # isort: off
 from tools.kernel.tuner.v1.common.tuner_datatypes import (
     RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
 # isort: on
-
-FLAGS = flags.FLAGS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -91,6 +88,10 @@ class KernelTunerBase(ABC):
                                       self.tuner_config.kernel_tuner_name,
                                       "xprof")
         self.use_bayesian_optimization = tuner_config.support_bayesian_optimization and run_config.use_bayesian_optimization
+        if run_config.use_bayesian_optimization and not tuner_config.support_bayesian_optimization:
+            logger.info(
+                f'{tuner_config.kernel_tuner_name} does not support Bayesian Optimization, falls back to full sweep.'
+            )
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -236,7 +237,7 @@ class KernelTunerBase(ABC):
                     0,  # invalid case count, doesn't matter here
                     duration_sec * 1.0)
                 logger.info(
-                    f"\nComplete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
+                    f"Complete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
                 )
             # read back all the cases and partition them into buckets for parallel execution
             cases = self.storage_manager.get_all_cases(
@@ -298,11 +299,7 @@ class KernelTunerBase(ABC):
                     'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade google-cloud-spanner && '
-                    'pip install --upgrade google-api-core && '
-                    'pip install --upgrade google-auth && '
-                    'pip install --upgrade absl-py && '
-                    'pip install --upgrade tensorflow && '
+                    'pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
@@ -499,7 +496,13 @@ class KernelTunerBase(ABC):
             tunable_params = self.tuner_config.tunable_params_class(
                 **suggested)
             params_key = tuple(sorted(suggested.items()))
-            cid = params_to_case_id.get(params_key)
+            cid = params_to_case_id.get(params_key, None)
+            if cid is None:
+                # This means optuna returns an invalid combination
+                logger.warning(
+                    f'Invalid TunableParam {params_key} is suggested for TuningKey {tuning_key}'
+                )
+                raise optuna.exceptions.TrialPruned()
 
             # --- OOM early-stop ---
             if any(tuning_key == k and s == TuningStatus.FAILED_OOM
@@ -508,7 +511,7 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Trial {trial.number}: Skipping {tunable_params} "
                     "due to expected OOM from a smaller configuration.")
-                if cid is not None and cid not in processed_ids:
+                if cid not in processed_ids:
                     results_buffer.append(
                         (self.run_config.case_set_id, self.run_config.run_id,
                          cid, TuningStatus.SKIPPED.value, worker_id, 0, 0, 0,
@@ -520,8 +523,10 @@ class KernelTunerBase(ABC):
                 raise optuna.exceptions.TrialPruned()
 
             # --- skip if this exact case was already measured ---
-            if cid is not None and cid in processed_ids:
-                raise optuna.exceptions.TrialPruned()
+            if cid in processed_ids:
+                raise Exception(
+                    f'{cid=} {tuning_key=} {tunable_params=} is already processed and Optuna should not suggest again'
+                )
 
             self._cleanup_xprof_dir()
             begin_trial_perf = time.perf_counter_ns()
@@ -531,23 +536,23 @@ class KernelTunerBase(ABC):
                                             tunable_params,
                                             iters=1)
             warmup_us = int(warmup_ns // 1000)
+            # status from self.run can only be SUCCESS or FAIL_OOM. Other unknow exception will raise exception in self.run so we don't fail silently
             if status != TuningStatus.SUCCESS:
                 logger.warning(
                     f"Trial {trial.number}: Warmup failed with status {status} "
                     f"for params {tunable_params}.")
-                if cid is not None:
-                    results_buffer.append(
-                        (self.run_config.case_set_id, self.run_config.run_id,
-                         cid, status.value, worker_id, 0, 0, 0,
-                         self.storage_manager.get_timestamp_sec(),
-                         self.run_config.tpu_queue_multi))
-                    processed_ids.add(cid)
-                    all_processed_cases_status.append(
-                        [tuning_key, tunable_params, status])
-                    if len(results_buffer) >= 10:
-                        self.storage_manager.save_results_batch(results_buffer)
-                        del results_buffer[:]
-                return float('inf')
+                results_buffer.append(
+                    (self.run_config.case_set_id, self.run_config.run_id, cid,
+                     status.value, worker_id, 0, 0, 0,
+                     self.storage_manager.get_timestamp_sec(),
+                     self.run_config.tpu_queue_multi))
+                processed_ids.add(cid)
+                all_processed_cases_status.append(
+                    [tuning_key, tunable_params, status])
+                if len(results_buffer) >= 10:
+                    self.storage_manager.save_results_batch(results_buffer)
+                    del results_buffer[:]
+                raise optuna.exceptions.TrialPruned()
 
             # --- measurement (100 iterations) ---
             measurement_iters = 100
@@ -565,19 +570,18 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Trial {trial.number}: Measurement failed with status "
                     f"{status} for params {tunable_params}.")
-                if cid is not None:
-                    results_buffer.append(
-                        (self.run_config.case_set_id, self.run_config.run_id,
-                         cid, status.value, worker_id, 0, warmup_us, 0,
-                         self.storage_manager.get_timestamp_sec(),
-                         self.run_config.tpu_queue_multi))
-                    processed_ids.add(cid)
-                    all_processed_cases_status.append(
-                        [tuning_key, tunable_params, status])
-                    if len(results_buffer) >= 10:
-                        self.storage_manager.save_results_batch(results_buffer)
-                        del results_buffer[:]
-                return float('inf')
+                results_buffer.append(
+                    (self.run_config.case_set_id, self.run_config.run_id, cid,
+                     status.value, worker_id, 0, warmup_us, 0,
+                     self.storage_manager.get_timestamp_sec(),
+                     self.run_config.tpu_queue_multi))
+                processed_ids.add(cid)
+                all_processed_cases_status.append(
+                    [tuning_key, tunable_params, status])
+                if len(results_buffer) >= 10:
+                    self.storage_manager.save_results_batch(results_buffer)
+                    del results_buffer[:]
+                raise optuna.exceptions.TrialPruned()
 
             if self.tuner_config.jit_kernel_pattern is not None:
                 from tools.kernel.tuner.v1.common.utils import \
@@ -603,19 +607,18 @@ class KernelTunerBase(ABC):
             logger.info(f"Trial {trial.number}: params={suggested}, "
                         f"latency={average_latency_us}us")
 
-            if cid is not None:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     TuningStatus.SUCCESS.value, worker_id, average_latency_us,
-                     warmup_us, total_time_us,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
-                processed_ids.add(cid)
-                all_processed_cases_status.append(
-                    [tuning_key, tunable_params, TuningStatus.SUCCESS])
-                if len(results_buffer) >= 10:
-                    self.storage_manager.save_results_batch(results_buffer)
-                    del results_buffer[:]
+            results_buffer.append(
+                (self.run_config.case_set_id, self.run_config.run_id, cid,
+                 TuningStatus.SUCCESS.value, worker_id, average_latency_us,
+                 warmup_us, total_time_us,
+                 self.storage_manager.get_timestamp_sec(),
+                 self.run_config.tpu_queue_multi))
+            processed_ids.add(cid)
+            all_processed_cases_status.append(
+                [tuning_key, tunable_params, TuningStatus.SUCCESS])
+            if len(results_buffer) >= 10:
+                self.storage_manager.save_results_batch(results_buffer)
+                del results_buffer[:]
 
             return float(average_latency_us)
 
@@ -780,7 +783,7 @@ class KernelTunerBase(ABC):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
             logger.info(
-                f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
+                f"Worker [{worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
             )
             self._cleanup_xprof_dir()
             if not self.run_config.run_locally and (
@@ -814,7 +817,7 @@ class KernelTunerBase(ABC):
                 )
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     TuningStatus.SKIPPED.value, FLAGS.worker_id, 0, 0, 0,
+                     TuningStatus.SKIPPED.value, worker_id, 0, 0, 0,
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
                 all_processed_cases_status.append(
@@ -833,7 +836,7 @@ class KernelTunerBase(ABC):
                 if status != TuningStatus.SUCCESS:
                     results_buffer.append(
                         (self.run_config.case_set_id, self.run_config.run_id,
-                         cid, status.value, FLAGS.worker_id, 0, warmup_us, 0,
+                         cid, status.value, worker_id, 0, warmup_us, 0,
                          self.storage_manager.get_timestamp_sec(),
                          self.run_config.tpu_queue_multi))
                     all_processed_cases_status.append(
@@ -853,7 +856,6 @@ class KernelTunerBase(ABC):
 
             measurement_iters = 100
             if self.tuner_config.jit_kernel_pattern is not None:
-                # xprof_folder = os.path.join(self.xprof_dir, f"{tuning_key.total_q_tokens=}_{tuning_key.sliding_window=}")
                 with jax.profiler.trace(self.xprof_dir,
                                         create_perfetto_link=False):
                     status, average_latency_ns = run_and_record_failure(
@@ -901,13 +903,13 @@ class KernelTunerBase(ABC):
                 (time.perf_counter_ns() - begin_case_id_time) // 1000)
             results_buffer.append(
                 (self.run_config.case_set_id, self.run_config.run_id, cid,
-                 status.value, FLAGS.worker_id, average_latency_us, warmup_us,
+                 status.value, worker_id, average_latency_us, warmup_us,
                  total_time_us, self.storage_manager.get_timestamp_sec(),
                  self.run_config.tpu_queue_multi))
             all_processed_cases_status.append(
                 [tuning_key, tunable_params, status])
 
-            if FLAGS.debug:
+            if self.run_config.debug:
                 logger.info(
                     f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
                 )
@@ -927,6 +929,6 @@ class KernelTunerBase(ABC):
             self.storage_manager.mark_bucket_completed(
                 self.run_config.case_set_id, self.run_config.run_id, bucket_id)
         logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
+            f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
         self._cleanup_xprof_dir()

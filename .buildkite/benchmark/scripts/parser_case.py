@@ -21,7 +21,7 @@ CMD_MAP = {
     "vllm_serve": "vllm serve",
     "vllm_bench_serve": "vllm bench serve",
     "lm_eval": "lm_eval",
-    "local_benchmark_serving": "python3 /workspace/tpu_inference/scripts/vllm/benchmarking/benchmark_serving.py"
+    "local_benchmark_serving": "python3 scripts/vllm/benchmarking/benchmark_serving.py"
 }
 
 # Helper function to print export statement only if value is valid

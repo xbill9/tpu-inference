@@ -724,6 +724,24 @@ def _print_flattened_table(rows,
     print(f'  ({len(rows)} result(s){count_suffix})')
 
 
+def _might_add_baseline_latency(baseline_map: dict, row: dict,
+                                formated_row: dict):
+    if baseline_map is not None:
+        tk_str = json.dumps(row.get('tuning_key', {}), sort_keys=True)
+        base_lat = baseline_map.get(tk_str)
+        if base_lat is not None:
+            formated_row['baseline_latency'] = base_lat
+            lat = row.get('Latency')
+            if lat is not None and base_lat > 0:
+                improvement = (base_lat - lat) / base_lat * 100
+                formated_row['latency_improvement%'] = f'{improvement:+.1f}%'
+            else:
+                formated_row['latency_improvement%'] = 'N/A'
+        else:
+            formated_row['baseline_latency'] = 'N/A'
+            formated_row['latency_improvement%'] = 'N/A'
+
+
 def _print_min_latency(rows, show_fields=None, baseline_map=None):
     """Print query_min_latency results as a table.
 
@@ -749,20 +767,9 @@ def _print_min_latency(rows, show_fields=None, baseline_map=None):
             'latency_us': r['Latency'],
             'warmup_us': r['WarmupTime'],
         }
-        if baseline_map is not None:
-            tk_str = json.dumps(r.get('tuning_key', {}), sort_keys=True)
-            base_lat = baseline_map.get(tk_str)
-            if base_lat is not None:
-                row['baseline_latency'] = base_lat
-                lat = r.get('Latency')
-                if lat is not None and base_lat > 0:
-                    improvement = (base_lat - lat) / base_lat * 100
-                    row['latency_improvement%'] = f'{improvement:+.1f}%'
-                else:
-                    row['latency_improvement%'] = 'N/A'
-            else:
-                row['baseline_latency'] = 'N/A'
-                row['latency_improvement%'] = 'N/A'
+        _might_add_baseline_latency(baseline_map=baseline_map,
+                                    row=r,
+                                    formated_row=row)
         return row
 
     _print_flattened_table(
@@ -801,20 +808,9 @@ def _print_case_latency(rows, show_fields=None, baseline_map=None):
             'warmup_us': r['WarmupTime'] if is_success else 'FAILURE',
             'total_time_us': r.get('TotalTime'),
         }
-        if baseline_map is not None:
-            tk_str = json.dumps(r.get('tuning_key', {}), sort_keys=True)
-            base_lat = baseline_map.get(tk_str)
-            if base_lat is not None and is_success:
-                row['baseline_latency'] = base_lat
-                lat = r.get('Latency')
-                if lat is not None and base_lat > 0:
-                    improvement = (base_lat - lat) / base_lat * 100
-                    row['latency_improvement%'] = f'{improvement:+.1f}%'
-                else:
-                    row['latency_improvement%'] = 'N/A'
-            else:
-                row['baseline_latency'] = 'N/A'
-                row['latency_improvement%'] = 'N/A'
+        _might_add_baseline_latency(baseline_map=baseline_map,
+                                    row=r,
+                                    formated_row=row)
         return row
 
     _print_flattened_table(

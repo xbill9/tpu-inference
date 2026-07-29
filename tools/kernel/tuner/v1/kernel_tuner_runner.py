@@ -98,9 +98,9 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
 
-_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
-    'bayesian_optimization', None,
-    'Override whether to use Bayesian optimization (optuna) instead of sweeping '
+_USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
+    'use_bayesian_optimization', False,
+    ' whether to use Bayesian optimization (optuna) instead of sweeping '
     'all tuning cases.  When True, the kernel tuner uses optuna to intelligently '
     'select which tunable-parameter combinations to evaluate.  When False, every '
     'case is evaluated (full sweep).  When not specified (None), the default set '
@@ -118,7 +118,7 @@ KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
     'mla_kernel_tuner': MlaKernelTuner,
-    'batched_rpa_kernel_tuner': BatchedRpaKernelTuner
+    'batched_rpa_kernel_tuner': BatchedRpaKernelTuner,
 }
 
 
@@ -147,33 +147,25 @@ def main(argv):
     tpu_queue_multi = get_tpu_queue_by_version_and_cores(
         tpu_version, tpu_cores, tpu_queue_multi)
 
-    run_config = RunConfig(case_set_id=case_set_id,
-                           run_id=run_id,
-                           case_set_desc=case_set_desc,
-                           tpu_version=tpu_version,
-                           tpu_cores=tpu_cores,
-                           tpu_queue_multi=tpu_queue_multi,
-                           run_locally=_RUN_LOCALLY.value,
-                           job_priority=_JOB_PRIORITY.value,
-                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
-                           gcp_project_id=_GCP_PROJECT_ID.value,
-                           spanner_instance_id=_SPANNER_INSTANCE_ID.value,
-                           spanner_database_id=_SPANNER_DATABASE_ID.value,
-                           worker_id=_WORKER_ID.value,
-                           autotune_mode=_AUTOTUNE_MODE.value,
-                           debug=_DEBUG.value)
+    run_config = RunConfig(
+        case_set_id=case_set_id,
+        run_id=run_id,
+        case_set_desc=case_set_desc,
+        tpu_version=tpu_version,
+        tpu_cores=tpu_cores,
+        tpu_queue_multi=tpu_queue_multi,
+        run_locally=_RUN_LOCALLY.value,
+        job_priority=_JOB_PRIORITY.value,
+        max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
+        gcp_project_id=_GCP_PROJECT_ID.value,
+        spanner_instance_id=_SPANNER_INSTANCE_ID.value,
+        spanner_database_id=_SPANNER_DATABASE_ID.value,
+        worker_id=_WORKER_ID.value,
+        autotune_mode=_AUTOTUNE_MODE.value,
+        use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
+        debug=_DEBUG.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
-
-    # Allow the caller to override the tuner's default optimization strategy
-    # via --bayesian_optimization.  None means "use the tuner's own default".
-    if _BAYESIAN_OPTIMIZATION.value is not None:
-        kernel_tuner.tuner_config.support_bayesian_optimization = (
-            _BAYESIAN_OPTIMIZATION.value)
-        logger.info(
-            f'Overriding support_bayesian_optimization to '
-            f'{_BAYESIAN_OPTIMIZATION.value} via --bayesian_optimization flag.'
-        )
 
     if kernel_tuner.run_config.run_locally:
         logger.info(

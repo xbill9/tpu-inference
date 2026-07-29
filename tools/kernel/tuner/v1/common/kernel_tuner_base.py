@@ -12,17 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from enum import Enum
+from dataclasses import asdict
 
 import jax
 import yaml
 from absl import flags
+
+# isort: off
+from tools.kernel.tuner.v1.common.tuner_datatypes import (
+    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
+# isort: on
 
 FLAGS = flags.FLAGS
 
@@ -39,88 +42,6 @@ def _literal_representer(dumper, data):
 
 
 yaml.add_representer(LiteralString, _literal_representer)
-
-
-@dataclass
-class TuningKey:
-    # Specify the key for tuning case
-    pass
-
-
-@dataclass
-class TunableParams:
-    # Specify the tiles for tuning case
-    pass
-
-
-class TuningStatus(Enum):
-    SUCCESS = 'SUCCESS'
-    FAILED_OOM = 'FAILED_OOM'
-    XPROF_MEASUREMENT_ERROR = 'XPROF_MEASUREMENT_ERROR'
-    UNKNOWN_ERROR = 'UNKNOWN_ERROR'
-    SKIPPED = 'SKIPPED'
-
-
-class TuningCase:
-
-    def __init__(self,
-                 tuning_key: TuningKey,
-                 tunable_params: TunableParams,
-                 is_baseline: bool = False):
-        self.tuning_key = tuning_key
-        self.tunable_params = tunable_params
-        self.is_baseline = is_baseline  # can be used to mark whether this case is the baseline case for the tuning key, which can be used for comparison in the analysis.
-
-    def __str__(self):
-        return json.dumps({
-            'tuning_key': asdict(self.tuning_key),
-            'tunable_params': asdict(self.tunable_params),
-            'is_baseline': self.is_baseline
-        })
-
-    @classmethod
-    def from_string(cls, string, tuning_key_class, tunable_params_class):
-        data = json.loads(string)
-        tuning_key = tuning_key_class(**data['tuning_key'])
-        tunable_params = tunable_params_class(**data['tunable_params'])
-        case = TuningCase(tuning_key, tunable_params)
-        case.is_baseline = data.get('is_baseline', False)
-        return case
-
-
-@dataclass
-class TunerConfig:
-    tuning_key_class: any = None
-    tunable_params_class: any = None
-    kernel_tuner_name: str = None
-    jit_kernel_pattern: str = None
-    # When support autotune and run_config.autotune_mode is True,
-    # the kernel tuner will read the cases from spanner using the case_set_id and kernel_tuner_name
-    support_autotune: bool = False
-    support_bayesian_optimization: bool = False
-    # Number of Bayesian optimization trials (optuna) to run per tuning key bucket.
-    # Only used when support_bayesian_optimization is True.
-    n_bayesian_trials: int = 50
-
-
-@dataclass
-class RunConfig:
-    case_set_id: str = None
-    run_id: str = None
-    case_set_desc: str = None
-    tpu_version: str = None
-    tpu_cores: int = None
-    tpu_queue_multi: str = None
-    run_locally: bool = False
-    job_priority: int = -10
-    max_execution_minutes: int = 20
-    job_bucket_size: int = 100
-    gcp_project_id: str = None
-    spanner_instance_id: str = None
-    spanner_database_id: str = None
-    worker_id: str = None
-    autotune_mode: bool = False
-    debug: bool = False
 
 
 class KernelTunerBase(ABC):
@@ -169,6 +90,7 @@ class KernelTunerBase(ABC):
         self.xprof_dir = os.path.join("/tmp/kernel_tuning",
                                       self.tuner_config.kernel_tuner_name,
                                       "xprof")
+        self.use_bayesian_optimization = tuner_config.support_bayesian_optimization and run_config.use_bayesian_optimization
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -322,7 +244,7 @@ class KernelTunerBase(ABC):
             assert len(
                 cases
             ) > 0, f"No cases found for CaseSetId {self.run_config.case_set_id}. This should not happen as the cases should have been generated and stored in the storage manager before."
-            if self.tuner_config.support_bayesian_optimization:
+            if self.use_bayesian_optimization:
                 # For Bayesian optimization, partition the cases by key.
                 buckets = []
                 previous_tuning_key = None
@@ -455,8 +377,7 @@ class KernelTunerBase(ABC):
             # bucket_id to keep generate_buildkite_pipeline and measure_latency
             # consistent.  In sweep mode we continue using the enumerate index.
             bucket_id = (case_id_start
-                         if self.tuner_config.support_bayesian_optimization
-                         else enum_bucket_id)
+                         if self.use_bayesian_optimization else enum_bucket_id)
             logger.info(
                 f"Adding Buildkite step for bucket {bucket_id}: cases [{case_id_start}, {case_id_end})"
             )
@@ -470,7 +391,7 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
-        if self.tuner_config.support_bayesian_optimization:
+        if self.use_bayesian_optimization:
             group_name = f'Bayesian Optimization Group[{self.tuner_config.kernel_tuner_name}]'
         else:
             group_name = f'Sweeping Group[{self.tuner_config.kernel_tuner_name}]'
@@ -820,14 +741,14 @@ class KernelTunerBase(ABC):
         """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
 
         Dispatches to Bayesian optimization (_measure_latency_bayesian) when
-        tuner_config.support_bayesian_optimization is True, otherwise falls back
+        self.use_bayesian_optimization is True, otherwise falls back
         to the original sequential sweep (_measure_latency_sweep).
 
         Args:
             begin_case_id: Start of the case_id range (inclusive) within the caseset to measure.
             end_case_id: End of the case_id range (exclusive) within the caseset to measure.
         """
-        if self.tuner_config.support_bayesian_optimization:
+        if self.use_bayesian_optimization:
             self._measure_latency_bayesian(begin_case_id, end_case_id)
             return
         self._measure_latency_sweep(begin_case_id, end_case_id)
@@ -865,7 +786,7 @@ class KernelTunerBase(ABC):
             if not self.run_config.run_locally and (
                     time_elapsed_minutes
                     > self.run_config.max_execution_minutes
-            ) and not self.tuner_config.support_bayesian_optimization:
+            ) and not self.use_bayesian_optimization:
                 logger.warning(
                     f"Worker [{worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
                 )

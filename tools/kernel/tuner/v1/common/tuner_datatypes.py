@@ -74,6 +74,9 @@ class TunerConfig:
     support_autotune: bool = False
     support_bayesian_optimization: bool = False
     jit_kernel_pattern: str = None
+    # Number of Bayesian optimization trials (optuna) to run per tuning key bucket.
+    # Only used when support_bayesian_optimization is True.
+    n_bayesian_trials: int = 50
 
 
 @dataclass
@@ -93,4 +96,5 @@ class RunConfig:
     spanner_database_id: str = None
     worker_id: str = None
     autotune_mode: bool = False
+    use_bayesian_optimization: bool = False
     debug: bool = False

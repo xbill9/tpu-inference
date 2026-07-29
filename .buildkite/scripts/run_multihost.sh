@@ -291,7 +291,6 @@ if [ "$#" -ge 1 ]; then
         for env_item in "${SERVER_CMD_ENVS[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$env_item")"
             DOCKER_ENV_ARGS+=("-e" "$env_item")
-            DOCKER_ENV_STR+="-e $(printf '%q ' "$env_item")"
         done
         for cmd_item in "${SERVER_CMD[@]}"; do
             VLLM_SERVE_CMD+="$(printf '%q ' "$cmd_item")"
@@ -336,6 +335,16 @@ echo "--- Cleaning up previous cluster state..."
 cleanup
 CLEANUP_DONE="false"
 
+# Safely parse EXTRA_DOCKER_ARGS into an array to prevent word-splitting on spaces
+eval "declare -a EXTRA_DOCKER_ARGS_ARRAY=(${EXTRA_DOCKER_ARGS:-})"
+
+# Serialize DOCKER_ENV_ARGS safely for SSH injection to Worker Nodes.
+if [ ${#DOCKER_ENV_ARGS[@]} -gt 0 ]; then
+    DOCKER_ENV_STR=$(printf '%q ' "${DOCKER_ENV_ARGS[@]}")
+else
+    DOCKER_ENV_STR=""
+fi
+
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
 # shellcheck disable=SC2086
@@ -356,8 +365,8 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" \
   -e IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-}" \
-  "${DOCKER_ENV_ARGS[@]}" \
-  ${EXTRA_DOCKER_ARGS:-} &
+  ${DOCKER_ENV_ARGS[@]:+"${DOCKER_ENV_ARGS[@]}"} \
+  ${EXTRA_DOCKER_ARGS_ARRAY[@]:+"${EXTRA_DOCKER_ARGS_ARRAY[@]}"} &
 
 sleep 60
 
@@ -460,13 +469,6 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
       -e HF_HOME=/root/.cache/huggingface \
       node bash -c "cd /workspace/tpu_inference && ${CLIENT_BENCH_CMD}"
   fi
-elif [ "$#" -gt 0 ]; then
-  echo "--- Running provided Benchmark Command on Head Node"
-  COMMAND_ARGS=("$@")
-  
-  docker exec \
-    -e HF_HOME=/root/.cache/huggingface \
-    node bash -c "${COMMAND_ARGS[*]}"
 else
   # Default: Run the curl test to verify the endpoint
   echo "--- Running default curl test"

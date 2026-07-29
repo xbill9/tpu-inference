@@ -160,4 +160,4 @@ docker run \
     "${GCLOUD_MOUNT_ARGS[@]}" \
     "${CHECKPOINT_MOUNT_ARGS[@]}" \
     "${ADDITIONAL_ARGS[@]}" \
-    "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
+    "${DOCKER_IMAGE}" -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled && ${RAY_START_CMD}"

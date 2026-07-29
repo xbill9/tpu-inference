@@ -126,7 +126,7 @@ class VllmSampler:
         "tp_size": self.config.tensor_parallel_size,
     }
     if self._engine:
-      self._engine.init_weight_transfer_engine(init_info)
+      await self._engine.init_weight_transfer_engine(init_info)
 
     logger.info("VllmSampler started successfully.")
 

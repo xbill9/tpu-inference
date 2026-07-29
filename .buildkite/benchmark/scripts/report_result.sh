@@ -137,7 +137,7 @@ RUN_TYPE="${RUN_TYPE:-DAILY}"
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
 
 # Upload logs to GCS if bucket is provided
-if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; then
+if [[ -n "${GCS_BUCKET:-}" ]]; then
   # TODO: When switching to Production after validation is complete, 
   # please change to use `$GCS_BUCKET` as the log storage bucket. 
   # For now, it is hardcoded to use the `vllm-bm-bk-storage` bucket.
@@ -150,11 +150,7 @@ if [[ -n "${GCS_BUCKET:-}" && "${SERVER_ALREADY_RUNNING:-false}" != "true" ]]; t
     echo "Warning: gsutil not found. Skipping log upload to GCS."
   fi
 else
-  if [[ "${SERVER_ALREADY_RUNNING:-false}" == "true" ]]; then
-    echo "Multi-host mode detected (SERVER_ALREADY_RUNNING=true). Skipping unified GCS upload; logs will be uploaded to the legacy GCS location by host script."
-  else
-    echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
-  fi
+  echo "Warning: GCS_BUCKET is not set. Skipping log upload to GCS."
 fi
 
 if [ "$EXIT_CODE" -ne 0 ]; then

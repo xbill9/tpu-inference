@@ -140,6 +140,7 @@ if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
     echo "--- Multi-host environment detected. Running via run_multihost.sh on host..."
 
     export EXTRA_DOCKER_ARGS="-v $ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts \
+      -v /etc/boto.cfg:/etc/boto.cfg \
       -e ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts \
       -e DEVICE=$DEVICE \
       -e RECORD_ID=$RECORD_ID \

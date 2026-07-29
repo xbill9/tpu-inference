@@ -118,9 +118,8 @@ def test_main_output_path_and_include_path(monkeypatch, tmp_path):
 
     class FakeEvaluationTracker:
 
-        def __init__(self, output_path, log_samples):
+        def __init__(self, output_path, ):
             self.output_path = output_path
-            self.log_samples = log_samples
 
     fake_loggers = types.SimpleNamespace(
         EvaluationTracker=FakeEvaluationTracker)
@@ -143,7 +142,6 @@ def test_main_output_path_and_include_path(monkeypatch, tmp_path):
         str(out_json),
         "--include_path",
         str(tmp_path),
-        "--log_samples",
     ]
     monkeypatch.setattr(sys, "argv", test_argv)
 
@@ -155,5 +153,4 @@ def test_main_output_path_and_include_path(monkeypatch, tmp_path):
     tracker = received_kwargs.get("evaluation_tracker")
     assert tracker is not None
     assert tracker.output_path == str(out_json)
-    assert tracker.log_samples is True
     assert shutdown_calls == [True]

@@ -342,9 +342,15 @@ def _ragged_paged_attention_kernel_loop(
     m_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, 128],
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
     kv_shuffle_vmem_ref=None,  # [bkv_sz // cp_group_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
+    ring_send_sems=None,  # DMA[cp_group_size]
+    ring_recv_sems=None,  # DMA[cp_group_size]
+    ring_sync_sems=None,  # REGULAR[cp_group_size]
+    ring_block_sem=None,  # REGULAR[1]
     *,
     # Static kwargs
     cp_group_size: int | None = None,
+    pcp_ring_axis_name: str | None = None,
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     write_last_seq_only: bool = False,
@@ -420,6 +426,20 @@ def _ragged_paged_attention_kernel_loop(
     def get_cp_local_size(x):
         return (x + cp_group_size - 1 - cp_rank) // cp_group_size
 
+    def get_cp_local_size_of_rank(x, rank):
+        """`get_cp_local_size` for an arbitrary rank's shard.
+
+        The PCP cache is striped by token with interleave 1: global position
+        `g` lives on rank `g % cp_group_size` at local index
+        `g // cp_group_size`. So rank `r` owns
+        `(x + cp_group_size - 1 - r) // cp_group_size` of the first `x` tokens.
+        Under the ring the shard in hand did not originate here, so its length
+        must be computed from the rank it started on, not from `cp_rank`.
+        """
+        return (x + cp_group_size - 1 - rank) // cp_group_size
+
+    ring_enabled = pcp_ring_axis_name is not None
+
     def get_kv_new_len(seq_idx):
         # Under PCP, new KV is all-gathered into token order.
         # The padded length is pcp * local_q_len, and the non-padded
@@ -452,6 +472,32 @@ def _ragged_paged_attention_kernel_loop(
         if skip_cache_attn:
             start_idx = jnp.maximum(start_idx, local_cache_len // bkv_sz)
         return start_idx
+
+    if ring_enabled:
+        # The ring rotates one hop per round in the +1 direction, so after
+        # `t` rounds the shard in hand started on rank `my_ring_id - t`.
+        # `cp_rank_ref` is the caller-supplied rank; `lax.axis_index` is the
+        # position on the mesh axis the remote DMAs address. They agree for
+        # every caller today, but the DMA must use the mesh index.
+        my_ring_id = lax.axis_index(pcp_ring_axis_name)
+
+        def ring_device_id(rank):
+            """Full mesh device id, with `rank` on the ring axis.
+
+            `DeviceIdType.MESH` wants one index per mesh axis, so on the
+            production mesh (which has several axes beside `pcp`) the neighbour
+            must be named by its position on *every* axis -- unchanged from
+            this device except on the ring axis.
+            """
+            if pcp_ring_mesh_axis_names is None:
+                return (rank, )
+            return tuple(
+                rank if name == pcp_ring_axis_name else lax.axis_index(name)
+                for name in pcp_ring_mesh_axis_names)
+
+        ring_next_id = ring_device_id(lax.rem(my_ring_id + 1, cp_group_size))
+        ring_prev_id = ring_device_id(
+            lax.rem(my_ring_id + cp_group_size - 1, cp_group_size))
 
     if cp_group_size is not None:
         cp_rank = cp_rank_ref[0]
@@ -590,7 +636,12 @@ def _ragged_paged_attention_kernel_loop(
             v = jnp.where(v_span >= kv_cache_len_local_int, v,
                           jnp.array(0.0, dtype=v.dtype))
 
-        if skip_current_attn:
+        if skip_current_attn and not ring_enabled:
+            # Under the ring the buffer holds *only* cache tokens (the ring
+            # never stages current KV) and the shard in hand belongs to some
+            # other rank, whose length is already passed as `effective_kv_len`.
+            # `kv_cache_len_local` is this rank's length, so applying it here
+            # would clip the wrong shard.
             kv_cache_len_local_int = kv_cache_len_local.astype(int_ty)
             mask = mask_and(mask, k_span < kv_cache_len_local_int)
             v = jnp.where(v_span < kv_cache_len_local_int, v,
@@ -773,6 +824,42 @@ def _ragged_paged_attention_kernel_loop(
             return offset, bkv_sz_frm_new, bkv_sz_frm_cache,
         else:
             return kv_len_start + bkv_sz_frm_cache, bkv_sz_frm_new, None
+
+    def _seed_ring_bkv(seq_idx, bkv_idx, slot):
+        """Load this rank's own cache pages for `bkv_idx` into ring `slot`.
+
+        Only the paged cache is read -- the ring cache phase never stages
+        current KV -- so this is `_fetch_bkv` with the new-KV half and the
+        cache-write bookkeeping removed. Tokens past this rank's local cache
+        length are left untouched in VMEM; they are masked off by
+        `effective_kv_len` on every rank the block visits.
+        """
+        sem = sems.at[0, 0]
+        vmem_ref = bkv_x2_ref.at[slot, :, :num_kv_heads_x2_per_kv_packing]
+        cache_hbm_shape = kv_cache_hbm_ref.shape
+        cache_hbm_ref = kv_cache_hbm_ref.reshape(
+            cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
+
+        local_len = get_kv_cache_len_local(seq_idx)
+        kv_left = jnp.maximum(local_len - bkv_idx * bkv_sz, 0)
+        page_indices_offset = seq_idx * pages_per_seq + bkv_idx * bkv_p
+
+        fetch_sz = jnp.minimum(kv_left, bkv_sz)
+        for i in range(bkv_p):
+            sz = jnp.clip(kv_left - i * page_size, 0, page_size)
+            # An out-of-range page index is clamped; sz is 0 there so no copy
+            # actually happens.
+            page_idx = jnp.minimum(page_indices_offset + i,
+                                   num_page_indices - 1)
+            _async_copy(
+                cache_hbm_ref.at[pl.ds(page_indices_ref[page_idx] * page_size,
+                                       sz)],
+                vmem_ref.at[pl.ds(i * page_size, sz)],
+                sem,
+                wait=False,
+            )
+        dst = vmem_ref.at[pl.ds(0, fetch_sz)]
+        _async_copy(src=dst, dst=dst, sem=sem, wait=True)
 
     def _update_kv_cache_full(seq_idx,
                               bkv_sem_idx,
@@ -1387,69 +1474,310 @@ def _ragged_paged_attention_kernel_loop(
                         acc_ref.at[*prev_lm_slice],
                     )
 
-            # Load acc and calculate final output.
-            acc = acc_ref[...]
-            l = broadcast_minor(l_ref[...], acc.shape)  # noqa
-            l_safe = jnp.where(l == 0.0, 1.0, l)
-            out = (acc * pl.reciprocal(l_safe, approx=True) if
-                   (l.dtype == jnp.float32 and out_dtype != jnp.float32) else
-                   lax.div(acc, l_safe)).astype(out_dtype)
+            finalize_bq_block(bq_idx, actual_bq_sz)
 
-            # Emit LSE = m + log(l) for this bq block.
-            if return_lse:
-                # Layout: l_ref/lse_hbm are 3D:
-                #   (actual_num_kv_heads, tokens * num_q_heads_per_kv_head, 128)
-                bq_q_start = q_start + bq_idx * actual_bq_sz
-                bq_sz_actual = jnp.minimum(actual_bq_sz, q_end - bq_q_start)
+    def finalize_bq_block(bq_idx, actual_bq_sz):
+        """Normalize (m, l, acc) into the output block and send it to HBM."""
+        # Load acc and calculate final output.
+        acc = acc_ref[...]
+        l = broadcast_minor(l_ref[...], acc.shape)  # noqa
+        l_safe = jnp.where(l == 0.0, 1.0, l)
+        out = (acc * pl.reciprocal(l_safe, approx=True) if
+               (l.dtype == jnp.float32 and out_dtype != jnp.float32) else
+               lax.div(acc, l_safe)).astype(out_dtype)
 
-                # Compute LSE in-place in l_ref.
-                l_ref[...] = m_ref[...] + jnp.log(l_ref[...])
+        # Emit LSE = m + log(l) for this bq block.
+        if return_lse:
+            # Layout: l_ref/lse_hbm are 3D:
+            #   (actual_num_kv_heads, tokens * num_q_heads_per_kv_head, 128)
+            bq_q_start = q_start + bq_idx * actual_bq_sz
+            bq_sz_actual = jnp.minimum(actual_bq_sz, q_end - bq_q_start)
 
-                # DMA: flat token-head dim.
-                bq_q_start_flat = pl.multiple_of(
-                    bq_q_start * num_q_heads_per_kv_head, 8)
-                bq_sz_actual_flat = pl.multiple_of(
-                    bq_sz_actual * num_q_heads_per_kv_head, 8)
-                if not debug_mode:
-                    cp = pltpu.make_async_copy(
-                        l_ref.at[:, pl.ds(0, bq_sz_actual_flat), :],
-                        lse_hbm_ref.at[:,
-                                       pl.ds(bq_q_start_flat, bq_sz_actual_flat
-                                             ), :],
-                        sems.at[4, 0],
-                    )
-                    cp.start()
-                    cp.wait()
+            # Compute LSE in-place in l_ref.
+            l_ref[...] = m_ref[...] + jnp.log(l_ref[...])
 
-            # Wait for previous bo to be fully sent before storing new bo.
-            bo_sem_idx = sem_ids_ref[2]
-            sem_ids_ref[2] = lax.select(bo_sem_idx == 0, 1, 0)
-            wait_send_bo(bo_sem_idx)
+            # DMA: flat token-head dim.
+            bq_q_start_flat = pl.multiple_of(
+                bq_q_start * num_q_heads_per_kv_head, 8)
+            bq_sz_actual_flat = pl.multiple_of(
+                bq_sz_actual * num_q_heads_per_kv_head, 8)
+            if not debug_mode:
+                cp = pltpu.make_async_copy(
+                    l_ref.at[:, pl.ds(0, bq_sz_actual_flat), :],
+                    lse_hbm_ref.at[:,
+                                   pl.ds(bq_q_start_flat, bq_sz_actual_flat
+                                         ), :],
+                    sems.at[4, 0],
+                )
+                cp.start()
+                cp.wait()
 
-            # Store output from acc to bo.
-            out_ref = (bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
-                actual_num_kv_heads * bq_sz *
-                num_q_heads_per_kv_head_per_packing,
-                head_dim,
-            ))
-            out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
-            strided_store(out_ref, 0, out_ref.shape[0], 1, out)
+        # Wait for previous bo to be fully sent before storing new bo.
+        bo_sem_idx = sem_ids_ref[2]
+        sem_ids_ref[2] = lax.select(bo_sem_idx == 0, 1, 0)
+        wait_send_bo(bo_sem_idx)
 
-            # Send cur bo
-            start_send_bo(seq_idx, bq_idx, bo_sem_idx)
+        # Store output from acc to bo.
+        out_ref = (bo_x2_ref.at[bo_sem_idx].bitcast(jnp.int32).reshape(
+            actual_num_kv_heads * bq_sz * num_q_heads_per_kv_head_per_packing,
+            head_dim,
+        ))
+        out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
+        strided_store(out_ref, 0, out_ref.shape[0], 1, out)
+
+        # Send cur bo
+        start_send_bo(seq_idx, bq_idx, bo_sem_idx)
+
+    def process_ring(static_q_len=None):
+        """PCP cache-phase attention with the KV ring run *inside* the kernel.
+
+        The non-ring cache phase needs every rank to see the whole cache, so
+        the caller must either all-gather Q (and reduce-scatter the output) or
+        all-gather the striped cache into one buffer. This path instead keeps
+        the local Q and the local cache shard and rotates KV around the PCP
+        ring one `bkv` block at a time, the way the torchtpu-vLLM streaming PCP
+        kernel does:
+
+          for each bkv block b:
+            seed slot 0 with this rank's own pages for b
+            for round t in [0, P):
+              start an async remote copy slot[t%2] -> next rank's slot[1-t%2]
+              attend the shard in slot[t%2]  (it started on rank `me - t`)
+              wait for the copy and hand-shake with both neighbors
+
+        Because `(m, l, acc)` accumulates across all P rounds, the whole cache
+        is folded into one online softmax: no per-round LSE merge, no output
+        collective, and only two `bkv` blocks of KV are ever resident. Only the
+        *length* of the shard in hand depends on which rank it came from, which
+        is why the phase must be non-causal (all cached tokens precede every
+        current-chunk query, so ordering carries no information here).
+        """
+        if static_q_len is None:
+            actual_bq_sz = bq_sz
+            num_bq = cdiv(q_len, actual_bq_sz)
+        else:
+            actual_bq_sz = min(bq_sz, static_q_len)
+            num_bq = cdiv(static_q_len, actual_bq_sz)
+        actual_bq_csz = min(bq_csz, actual_bq_sz)
+
+        P = cp_group_size
+        global_cache_len = kv_lens_ref[seq_idx] - get_kv_new_len(seq_idx)
+        # Rank 0 always owns the longest shard, so its block count bounds every
+        # rank's. The ring is a collective: all ranks must run the same number
+        # of blocks and rounds, so drive the loop with the max and let the
+        # short ranks' trailing tokens be masked off.
+        max_local_len = get_cp_local_size_of_rank(global_cache_len, 0)
+        num_bkv = jnp.maximum(cdiv(max_local_len, bkv_sz), 1)
+
+        def ring_neighbor_barrier():
+            """Balanced two-neighbor barrier between `bkv` blocks.
+
+            Round `P-1` starts no copy and therefore signals nothing, so
+            without this a fast rank could start the next block's round-0 send
+            into a neighbor's slot that the neighbor is still reading. Every
+            rank signals twice and waits for two, so the counts balance with no
+            first/last-block bookkeeping. Safe on a regular semaphore because
+            by the time any rank finishes a block every rank is provably inside
+            the kernel (they all took part in that block's remote copies).
+            """
+            for neighbor in (ring_prev_id, ring_next_id):
+                pl.semaphore_signal(
+                    ring_block_sem,
+                    1,
+                    device_id=neighbor,
+                    device_id_type=pl.DeviceIdType.MESH,
+                )
+            pl.semaphore_wait(ring_block_sem, 2)
+
+        @pl.loop(0, num_bq, unroll=False)
+        def compute_with_bq(bq_idx):
+            # Re-initialize l, m, acc to 0 before the ring.
+            l_ref[...] = jnp.full_like(l_ref, 0.0)
+            m_ref[...] = jnp.full_like(m_ref, -jnp.inf)
+            acc_ref[...] = jnp.full_like(acc_ref, 0.0)
+
+            bq_sem_idx = sem_ids_ref[0]
+            is_last_bq = bq_idx + 1 == num_bq
+            next_bq_idx = lax.select(is_last_bq, 0, bq_idx + 1)
+            next_seq_idx = lax.select(is_last_bq, seq_idx + 1, seq_idx)
+            next_bq_sem_idx = lax.select(bq_sem_idx == 0, 1, 0)
+
+            @pl.when(next_seq_idx < end_seq_idx)
+            def prefetch_next_bq():
+                sem_ids_ref[0] = next_bq_sem_idx
+                start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
+
+            wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
+
+            # Non-causal: `q_span` is unused, but keep the same accounting as
+            # `process` so a future causal ring has the right base.
+            processed_q_len = kv_q_gap + bq_idx * actual_bq_sz
+
+            @pl.loop(0, num_bkv, unroll=False)
+            def compute_with_bkv(bkv_idx):
+                processed_kv_len = bkv_idx * bkv_sz
+                _seed_ring_bkv(seq_idx, bkv_idx, 0)
+
+                @pl.loop(0, P, unroll=False)
+                def ring_round(round_idx):
+                    curr_slot = lax.rem(round_idx, 2)
+                    next_slot = 1 - curr_slot
+                    # The shard in hand has hopped `round_idx` times, so it
+                    # started on `my_ring_id - round_idx`, and it is that
+                    # rank's stripe length that bounds it.
+                    src_rank = lax.rem(my_ring_id + P - round_idx, P)
+                    effective_kv_len = get_cp_local_size_of_rank(
+                        global_cache_len, src_rank)
+
+                    if P > 1:
+                        # Sems are indexed by round; the last round starts no
+                        # copy, so clamp to the last live index.
+                        safe_round = jnp.minimum(round_idx, P - 2)
+                        safe_prev_round = jnp.minimum(round_idx - 1, P - 2)
+
+                        @pl.when(round_idx > 0)
+                        def wait_ring_sync():
+                            # Two signals per live round -- one from the sender
+                            # ("your next shard is on the way") and one from the
+                            # receiver ("I am done with the slot you overwrite
+                            # next") -- except the final round, which only ever
+                            # gets the sender's.
+                            @pl.when(round_idx == P - 1)
+                            def wait_last_round():
+                                pl.semaphore_wait(
+                                    ring_sync_sems.at[safe_prev_round], 1)
+
+                            @pl.when(round_idx < P - 1)
+                            def wait_middle_round():
+                                pl.semaphore_wait(
+                                    ring_sync_sems.at[safe_prev_round], 2)
+
+                        remote_op = pltpu.make_async_remote_copy(
+                            src_ref=bkv_x2_ref.at[curr_slot],
+                            dst_ref=bkv_x2_ref.at[next_slot],
+                            send_sem=ring_send_sems.at[safe_round],
+                            recv_sem=ring_recv_sems.at[safe_round],
+                            device_id=ring_next_id,
+                            device_id_type=pl.DeviceIdType.MESH,
+                        )
+
+                        @pl.when(round_idx < P - 1)
+                        def start_rotate():
+                            remote_op.start()
+
+                    # Flash attention against the shard currently in hand.
+                    effective_bkv_sz = jnp.clip(
+                        effective_kv_len - processed_kv_len, 0, bkv_sz)
+                    num_loops = cdiv(effective_bkv_sz, bkv_csz)
+
+                    @pl.loop(0, num_loops, unroll=False)
+                    def attention_loop(idx):
+                        prev_lm_slice = None
+                        prev_p = None
+                        prev_v = None
+                        prev_exp_m_diff = None
+                        bkv_start = idx * bkv_csz
+
+                        for bq_start in range(0, actual_bq_sz, actual_bq_csz):
+                            for kv_head_idx in range(actual_num_kv_heads):
+                                bk_c, bv_c = load_bkv(
+                                    curr_slot,
+                                    kv_head_idx,
+                                    bkv_start,
+                                    bkv_csz,
+                                )
+                                bq_c = load_bq(bq_sem_idx, kv_head_idx,
+                                               bq_start, actual_bq_csz)
+
+                                lm_slice_start = (bq_start *
+                                                  num_q_heads_per_kv_head)
+                                lm_slice_size = (actual_bq_csz *
+                                                 num_q_heads_per_kv_head)
+                                lm_slice = (kv_head_idx,
+                                            pl.ds(lm_slice_start,
+                                                  lm_slice_size))
+
+                                (cur_p, cur_v, cur_exp_m_diff
+                                 ) = flash_attention_step1_qk_softmax(
+                                     bq_c,
+                                     bk_c,
+                                     bv_c,
+                                     l_ref.at[*lm_slice],
+                                     m_ref.at[*lm_slice],
+                                     processed_q_len=processed_q_len +
+                                     bq_start,
+                                     processed_kv_len=processed_kv_len +
+                                     bkv_start,
+                                     effective_kv_len=effective_kv_len,
+                                 )
+                                if prev_lm_slice is not None:
+                                    flash_attention_step2_pv(
+                                        prev_p,
+                                        prev_v,
+                                        prev_exp_m_diff,
+                                        acc_ref.at[*prev_lm_slice],
+                                    )
+                                prev_lm_slice = lm_slice
+                                prev_p = cur_p
+                                prev_v = cur_v
+                                prev_exp_m_diff = cur_exp_m_diff
+
+                        # Execute pv of last iteration.
+                        assert prev_lm_slice is not None
+                        flash_attention_step2_pv(
+                            prev_p,
+                            prev_v,
+                            prev_exp_m_diff,
+                            acc_ref.at[*prev_lm_slice],
+                        )
+
+                    if P > 1:
+
+                        @pl.when(round_idx < P - 1)
+                        def finish_rotate():
+                            remote_op.wait()
+                            pl.semaphore_signal(
+                                ring_sync_sems.at[safe_round],
+                                1,
+                                device_id=ring_next_id,
+                                device_id_type=pl.DeviceIdType.MESH,
+                            )
+
+                            # Tell the sender its next write target is free.
+                            # Round P-2 is the last one that sends, so nobody
+                            # waits on a signal past it.
+                            @pl.when(round_idx < P - 2)
+                            def release_slot_to_sender():
+                                pl.semaphore_signal(
+                                    ring_sync_sems.at[safe_round],
+                                    1,
+                                    device_id=ring_prev_id,
+                                    device_id_type=pl.DeviceIdType.MESH,
+                                )
+
+                if P > 1:
+                    ring_neighbor_barrier()
+
+            finalize_bq_block(bq_idx, actual_bq_sz)
 
     ### ------- Kernel start ------- ###
 
     @pl.when(seq_idx == start_seq_idx)
     def prologue():
         start_fetch_bq(seq_idx=start_seq_idx, bq_idx=0, bq_sem_idx=0)
-        start_fetch_bkv(seq_idx=start_seq_idx,
-                        bkv_idx=cur_seq_start_bkv_idx,
-                        bkv_sem_idx=0)
+        # The ring owns both bkv slots and seeds them itself, so it must not
+        # inherit a prefetch nobody waits on.
+        if not ring_enabled:
+            start_fetch_bkv(seq_idx=start_seq_idx,
+                            bkv_idx=cur_seq_start_bkv_idx,
+                            bkv_sem_idx=0)
 
     @pl.when(jnp.logical_and(start_seq_idx <= seq_idx, seq_idx < end_seq_idx))
     def pipeline():
-        process(static_q_len=static_q_len)
+        if ring_enabled:
+            process_ring(static_q_len=static_q_len)
+        else:
+            process(static_q_len=static_q_len)
 
     @pl.when(seq_idx == end_seq_idx - 1)
     def epilogue():
@@ -1979,6 +2307,8 @@ def get_default_block_sizes(
         "write_last_seq_only",
         "cp_group_size",
         "pcp_chunk_size",
+        "pcp_ring_axis_name",
+        "pcp_ring_mesh_axis_names",
     ),
     donate_argnames="kv_cache",
 )
@@ -2001,6 +2331,8 @@ def ragged_paged_attention(
     cp_group_size: int | None = None,
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
     pcp_chunk_size: int | None = None,
+    pcp_ring_axis_name: str | None = None,
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     write_last_seq_only: bool = False,
@@ -2050,7 +2382,27 @@ def ragged_paged_attention(
     kv_cache_lens: the number of kv cache tokens that have been computed for each sequence, only needed for PCP. 
     cp_rank: the rank of the current device in the context parallelism group.
     cp_group_size: the size of the context parallelism group.
-    q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP. 
+    q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP.
+    pcp_ring_axis_name: PCP only. When set, the cache phase streams the striped
+      KV cache around the PCP ring *inside* the kernel instead of requiring the
+      caller to all-gather Q or the cache: each rank keeps its local Q and its
+      local cache shard, and one `bkv` block at a time is rotated rank-to-rank
+      with async remote DMAs while `(m, l, acc)` accumulates across all
+      `cp_group_size` rounds. The call must be inside a `jax.shard_map` whose
+      mesh has this axis, and the cache-phase flags must be set
+      (`skip_current_attn=True`, `use_causal_mask=False`,
+      `update_kv_cache=False`). Communication is one cache shard per hop, and
+      only two `bkv` blocks of KV are resident at a time, so peak memory does
+      not grow with `cp_group_size` the way an all-gathered cache does. Note
+      that no explicit barrier / `collective_id` is used: the kernel relies on
+      Mosaic's device-entry barrier, because reusing a fixed collective id
+      across separately compiled layer/prefill/decode graphs can mix barrier
+      generations and hang the ring.
+    pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
+      order. `DeviceIdType.MESH` addresses a neighbour by its index on every
+      axis, so on a multi-axis production mesh this is required to name the
+      ring neighbour correctly; pass `tuple(mesh.axis_names)`. Defaults to a
+      one-axis mesh.
     use_causal_mask: if true, use causal mask.
     write_last_seq_only: PCP only. PCP fuses a request's head and tail chunk
       into one launch as two "sequences" that are really the same request (same
@@ -2128,6 +2480,40 @@ def ragged_paged_attention(
         m_block_sizes=m_block_sizes,
         vmem_limit_bytes=vmem_limit_bytes,
     )
+
+    if pcp_ring_axis_name is not None:
+        # The ring folds the whole striped cache into one online softmax, so it
+        # is only meaningful for the cache phase and only correct when nothing
+        # in the mask depends on this rank's own stripe length.
+        if cp_group_size is None or cp_rank is None:
+            raise ValueError(
+                "pcp_ring_axis_name requires cp_group_size and cp_rank.")
+        if kv_cache_lens is None:
+            raise ValueError("pcp_ring_axis_name requires kv_cache_lens.")
+        if not skip_current_attn:
+            raise NotImplementedError(
+                "pcp_ring_axis_name is a cache-phase path and requires "
+                "skip_current_attn=True; the current chunk is causal and its "
+                "KV is not striped, so it cannot ride the ring.")
+        if skip_cache_attn:
+            raise ValueError(
+                "pcp_ring_axis_name cannot be combined with skip_cache_attn.")
+        if use_causal_mask:
+            raise NotImplementedError(
+                "pcp_ring_axis_name requires use_causal_mask=False: a rotated "
+                "shard carries no per-token global positions, only its "
+                "originating rank's length.")
+        if update_kv_cache:
+            raise NotImplementedError(
+                "pcp_ring_axis_name requires update_kv_cache=False; the cache "
+                "write belongs to the current phase.")
+        if skip_kv_mask:
+            raise ValueError(
+                "pcp_ring_axis_name requires the KV mask: each round's shard "
+                "is bounded by its originating rank's stripe length.")
+        if sliding_window is not None:
+            raise NotImplementedError(
+                "pcp_ring_axis_name does not support sliding_window yet.")
 
     actual_num_q_heads = q.shape[1]
     actual_head_dim = q.shape[2]
@@ -2235,6 +2621,11 @@ def ragged_paged_attention(
             kv_cache.dtype,
         ) if cp_group_size is not None else None
 
+        # Ring semaphores are indexed by ring round. Round cp_group_size-1
+        # starts no copy, so cp_group_size-1 slots are enough.
+        num_ring_rounds = max(cp_group_size -
+                              1, 1) if pcp_ring_axis_name is not None else 0
+
         scratch_shapes = [
             bkv_double_buf,  # (bkv_x2_ref) Double buffering for kv block.
             bq_double_buf,  # (bq_x2_ref) Double buffering for q block.
@@ -2245,7 +2636,17 @@ def ragged_paged_attention(
             l_scratch,
             m_scratch,
             acc_scratch,
-            kv_shuffle_scratch
+            kv_shuffle_scratch,
+            # PCP ring: KV rotation DMAs, the per-round hand-shake, and the
+            # inter-block neighbor barrier.
+            pltpu.SemaphoreType.DMA((num_ring_rounds, ))
+            if pcp_ring_axis_name is not None else None,
+            pltpu.SemaphoreType.DMA((num_ring_rounds, ))
+            if pcp_ring_axis_name is not None else None,
+            pltpu.SemaphoreType.REGULAR((num_ring_rounds, ))
+            if pcp_ring_axis_name is not None else None,
+            pltpu.SemaphoreType.REGULAR
+            if pcp_ring_axis_name is not None else None,
         ]
 
         scalar_prefetches = (
@@ -2296,6 +2697,8 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 cp_group_size=cp_group_size,
+                pcp_ring_axis_name=pcp_ring_axis_name,
+                pcp_ring_mesh_axis_names=pcp_ring_mesh_axis_names,
                 write_last_seq_only=write_last_seq_only,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
@@ -2396,6 +2799,59 @@ def ragged_paged_attention(
             while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
                 bkv_csz -= page_size
             bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
+        if pcp_ring_axis_name is not None:
+            # The ring must rotate the cache exactly ONCE, so the whole local Q
+            # has to be a single bq block: the default heuristic
+            # (`bq_sz = min(2048 // q_per_kv, max_q // 2)`) deliberately yields
+            # >= 2 blocks so the Q fetch pipelines, but every extra bq block
+            # re-streams the entire cache across the ring, and cross-device
+            # bandwidth -- not the Q fetch -- is what dominates here. Compute
+            # still proceeds in bq_csz subtiles: the same split the streaming
+            # PCP kernel calls q_block_size / q_compute_size.
+            #
+            # VMEM is the binding constraint. bq_sz sizes bq/bo/l/m/acc, and
+            # bkv_sz sizes the rotation buffer -- and the decode sub-kernel's
+            # bkv_sz grows with pages_per_seq (8192 at a 1M-token table, ~50MB
+            # on its own). Spend that budget on the Q tile instead: shrink
+            # bkv_sz first, only then give up Q blocks. Estimates run against a
+            # margin because `get_vmem_estimate_bytes` omits spill space.
+            VMEM_SAFETY = 0.85
+            budget = int(
+                VMEM_SAFETY *
+                (vmem_limit_bytes or pltpu.get_tpu_info().vmem_capacity_bytes))
+            bq_sz = next_power_of_2(max_num_tokens)
+            bkv_sz = bs["bkv_sz"]
+
+            def _fits(bq, bkv):
+                return get_vmem_estimate_bytes(
+                    actual_num_kv_heads,
+                    actual_num_q_heads_per_kv_head,
+                    actual_head_dim,
+                    bq,
+                    bkv,
+                    q.dtype,
+                    kv_cache.dtype,
+                ) <= budget
+
+            while not _fits(bq_sz, bkv_sz):
+                if bkv_sz > page_size:
+                    bkv_sz //= 2
+                elif bq_sz > 1:
+                    bq_sz //= 2
+                else:
+                    break
+            bq_csz = min(bs["bq_csz"], bq_sz)
+            while bq_csz > 1 and bq_sz % bq_csz != 0:
+                bq_csz -= 1
+            bkv_csz = min(bs["bkv_csz"], bkv_sz)
+            while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
+                bkv_csz -= page_size
+            bs = {
+                **bs, "bq_sz": bq_sz,
+                "bq_csz": bq_csz,
+                "bkv_sz": bkv_sz,
+                "bkv_csz": bkv_csz
+            }
         return bs
 
     # Decode-only

@@ -822,8 +822,11 @@ def pcp_ragged_paged_attention(
     `2*pcp-1-r` (tail), so its local buffer is `[head_chunk | tail_chunk]`.
 
     Two kernel launches per rank and is LSE-combined:
-      * cache phase:  all-gather Q across pcp , attend the pcp-strided 
-        cache (non-causal, no write), LSE all-reduce over pcp.
+      * cache phase:  one of three strategies, see `cache_phase` --
+        `gather_q` all-gathers Q and LSE reduce-scatters the output,
+        `gather_kv` all-gathers the striped cache into token order,
+        `ring` streams the striped cache around the pcp ring inside the
+        kernel (local Q, no output collective, two KV blocks resident).
       * current phase: the local Q attends the current KV (causal,
         token-order all-gathered KV, per-chunk `q_pos_offset`); the tail phase
         writes the strided cache. 
@@ -854,8 +857,12 @@ def pcp_ragged_paged_attention(
     else:
         _cache_phase = cache_phase.lower()
 
-    assert _cache_phase in ("gather_kv", "gather_q"), (
-        f"cache_phase must be 'gather_kv' or 'gather_q', got {_cache_phase!r}")
+    # "ring" is never auto-selected: it moves the same bytes as gather-KV but
+    # keeps only two KV blocks resident instead of the whole gathered cache,
+    # so it is a memory play the caller opts into.
+    assert _cache_phase in ("gather_kv", "gather_q", "ring"), (
+        "cache_phase must be 'gather_kv', 'gather_q' or 'ring', got "
+        f"{_cache_phase!r}")
 
     _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
     _inv = [0] * two_p
@@ -898,6 +905,30 @@ def pcp_ragged_paged_attention(
         if cache_pages == 0:
             o1 = l1 = None
             kvc1 = kvc
+        elif _cache_phase == "ring":
+            # The kernel streams the striped cache around the pcp ring itself,
+            # so the local Q attends the whole cache with no Q all-gather and
+            # no output collective -- o1/l1 come back already local. Only two
+            # KV blocks are resident, so unlike gather-KV nothing has to be
+            # compacted into a `cache_pages`-sized buffer first.
+            cu_ring = jnp.zeros_like(cu_q_lens[0]).at[1:].set(q_l.shape[0])
+            o1, _, l1 = rpa_v3_cp.ragged_paged_attention(
+                q_l,
+                k_l,
+                v_l,
+                kvc,
+                kvl,
+                pi,
+                cu_ring,
+                dist_cache,
+                kv_cache_lens=kvcl,
+                pcp_ring_axis_name=pcp_axis,
+                pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
+            kvc1 = kvc  # cache unchanged here; the current phase writes it
         elif _cache_phase == "gather_kv":
             local_q = q_l.shape[
                 0]  # = padded_q_len // pcp = 2 * pcp_chunk_size

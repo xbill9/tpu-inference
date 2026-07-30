@@ -821,7 +821,7 @@ class KernelTunerBase(ABC):
                      self.storage_manager.get_timestamp_sec(),
                      self.run_config.tpu_queue_multi))
                 all_processed_cases_status.append(
-                    [tuning_key, tunable_params, TuningStatus.SKIPPED])
+                    [tuning_key, tunable_params, TuningStatus.FAILED_OOM])
                 continue
 
             begin_case_id_time = time.perf_counter_ns()
@@ -881,6 +881,7 @@ class KernelTunerBase(ABC):
                 matching_events, average_latency_us = find_events_by_pattern(
                     self.xprof_dir, self.tuner_config.jit_kernel_pattern)
                 if len(matching_events) != measurement_iters:
+                    # This is a critical measurement error when we don't want to fail siliently
                     msg = (
                         f"Expected {measurement_iters} matching events for "
                         f"pattern '{self.tuner_config.jit_kernel_pattern}' in "

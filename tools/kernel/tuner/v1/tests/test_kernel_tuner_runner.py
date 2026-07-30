@@ -315,6 +315,7 @@ class ExampleKernelTunerSearchSpaceTest(absltest.TestCase):
             tpu_cores=2,
             tpu_queue_multi="tpu_v7x_2_queue",
             run_locally=True,
+            use_bayesian_optimization=True,
             job_bucket_size=100,
         )
         return ExampleKernelTuner(run_config=run_config), TuningKey

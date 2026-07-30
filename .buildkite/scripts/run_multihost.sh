@@ -462,6 +462,8 @@ if [ -n "${CLIENT_BENCH_CMD}" ]; then
       -e HF_HOME=/root/.cache/huggingface \
       -e SERVER_ALREADY_RUNNING="true" \
       -e VLLM_PORT="${VLLM_PORT}" \
+      -e GCS_BUCKET="${GCS_BUCKET:-}" \
+      -e RECORD_ID="${RECORD_ID:-}" \
       node bash -c "cd /workspace/tpu_inference && chmod +x .buildkite/benchmark/scripts/run_bm.sh && .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME"
   else
     echo "--- Running Benchmark Command on Head Node"

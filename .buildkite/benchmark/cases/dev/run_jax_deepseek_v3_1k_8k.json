@@ -47,14 +47,14 @@
           "tokenizer": "deepseek-ai/DeepSeek-R1",
           "load-format": "runai_streamer",
           "seed": 42,
-          "max-num-seqs": 160,
-          "max-num-batched-tokens": 512,
+          "max-num-seqs": 64,
+          "max-num-batched-tokens": 256,
           "tensor-parallel-size": {
             "v7x-16": 16
           },
           "max-model-len": 9216,
           "kv-cache-dtype": "fp8",
-          "gpu-memory-utilization": 0.95,
+          "gpu-memory-utilization": 0.85,
           "enable-expert-parallel": true,
           "no-enable-prefix-caching": true,
           "async-scheduling": true,

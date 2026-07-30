@@ -4,11 +4,11 @@
 """RL rollout sampler interfaces for tpu_inference."""
 
 from tpu_inference.rl.vllm_sampler import (
-    VllmSampler,
+    RLVllmSampler,
     VllmSamplerConfig,
 )
 
 __all__ = [
-    "VllmSampler",
+    "RLVllmSampler",
     "VllmSamplerConfig",
 ]

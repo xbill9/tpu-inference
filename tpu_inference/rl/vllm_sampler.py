@@ -3,7 +3,7 @@
 
 """Asynchronous vLLM Sampler engine implementation for tpu-inference.
 
-This module provides a standalone vLLM serving and rollout sampler (`VllmSampler`)
+This module provides a standalone vLLM serving and rollout sampler (`RLVllmSampler`)
 tailored for Reinforcement Learning (RL) workloads on TPUs.
 Satisfies the open-source Tunix `Sampler` Protocol defined in:
 https://github.com/google/tunix/blob/main/tunix/experimental/sampler/sampler.py
@@ -35,13 +35,13 @@ def _get_val(obj: Any, key: str, default: Any = None) -> Any:
 
 
 # ==============================================================================
-# Configuration for VllmSampler
+# Configuration for RLVllmSampler
 # ==============================================================================
 
 
 @dataclass
 class VllmSamplerConfig:
-  """Configuration parameters for VllmSampler in tpu-inference."""
+  """Configuration parameters for VllmSamplerConfig in tpu-inference."""
 
   model_path: str = "Qwen/Qwen2.5-1.5B"
   tensor_parallel_size: int = 1
@@ -57,11 +57,11 @@ class VllmSamplerConfig:
 
 
 # ==============================================================================
-# Concrete VllmSampler Implementation (Duck-Typed for any RL orchestrator)
+# Concrete RLVllmSampler Implementation (Duck-Typed for any RL orchestrator)
 # ==============================================================================
 
 
-class VllmSampler:
+class RLVllmSampler:
   """Asynchronous vLLM sampler for RL inside `tpu-inference`.
 
   Satisfies the open-source Tunix `Sampler` Protocol without importing Tunix.
@@ -103,10 +103,10 @@ class VllmSampler:
   async def start(self, **kwargs: Any) -> None:
     """Initializes the vLLM engine and execution environment."""
     if self._is_running:
-      logger.warning("VllmSampler is already running.")
+      logger.warning("RLVllmSampler is already running.")
       return
 
-    logger.info("Initializing VllmSampler with model: %s", self.config.model_path)
+    logger.info("Initializing RLVllmSampler with model: %s", self.config.model_path)
 
     engine_args = AsyncEngineArgs(
         model=self.config.model_path,
@@ -128,23 +128,23 @@ class VllmSampler:
     if self._engine:
       await self._engine.init_weight_transfer_engine(init_info)
 
-    logger.info("VllmSampler started successfully.")
+    logger.info("RLVllmSampler started successfully.")
 
   async def stop(self, **kwargs: Any) -> None:
     """Stops the sampler and releases resources."""
     if not self._is_running:
       return
-    logger.info("Stopping VllmSampler...")
+    logger.info("Stopping RLVllmSampler...")
     self._is_paused = True
     self._engine = None
     self._is_running = False
-    logger.info("VllmSampler stopped.")
+    logger.info("RLVllmSampler stopped.")
 
   async def pause(self, **kwargs: Any) -> None:
     """Pauses request intake and drains active batch iterations during weight updates."""
     if self._is_paused:
       return
-    logger.info("Pausing VllmSampler inference intake for weight sync...")
+    logger.info("Pausing RLVllmSampler inference intake for weight sync...")
     self._is_paused = True
     # Note: vLLM's pause_background_loop stops the scheduler from taking new requests from the queue.
     # Ongoing requests in the batch will be completed or drained depending on internal vLLM state.
@@ -156,7 +156,7 @@ class VllmSampler:
     """Resumes inference processing after weight sync completion."""
     if not self._is_paused:
       return
-    logger.info("Resuming VllmSampler inference serving...")
+    logger.info("Resuming RLVllmSampler inference serving...")
     if self._engine and hasattr(self._engine, "resume_background_loop"):
       await self._engine.resume_background_loop()
     self._is_paused = False

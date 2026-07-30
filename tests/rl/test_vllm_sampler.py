@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
-"""Unit tests for VllmSampler dynamic duck typing and weight sync in tpu_inference.rl."""
+"""Unit tests for RLVllmSampler dynamic duck typing and weight sync in tpu_inference.rl."""
 
 import asyncio
 import unittest
@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 from tpu_inference.rl.vllm_sampler import (
-  VllmSampler,
-  VllmSamplerConfig,
+    RLVllmSampler,
+    VllmSamplerConfig,
 )
 
 
-class TestVllmSamplerDuckTyping(unittest.TestCase):
+class TestRLVllmSamplerDuckTyping(unittest.TestCase):
   """Tests dynamic attribute handling of arbitrary request objects and dicts."""
 
 
@@ -37,18 +37,18 @@ class TestVllmSamplerDuckTyping(unittest.TestCase):
 
 
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B")
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
     self.assertIsNotNone(sampler)
     self.assertEqual(sampler.config.model_path, "Qwen/Qwen2.5-1.5B")
 
 
-class TestVllmSamplerInference(unittest.TestCase):
+class TestRLVllmSamplerInference(unittest.TestCase):
   """Tests sampling batch processing, text decoding, and logprob conversion."""
 
   def test_sample_with_mocked_engine(self):
     """Verifies full sample() execution flow with a mocked AsyncLLMEngine."""
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B")
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
 
     # Construct mock AsyncLLMEngine
     mock_engine = MagicMock()
@@ -93,7 +93,7 @@ class TestVllmSamplerInference(unittest.TestCase):
   def test_sample_raw_string_mode(self):
     """Verifies sampling when prompt lists are raw strings."""
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B")
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
 
     mock_engine = MagicMock()
 
@@ -115,7 +115,7 @@ class TestVllmSamplerInference(unittest.TestCase):
   def test_sample_error_resilience(self):
     """Verifies error isolation when an individual generator stream raises an exception."""
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B")
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
 
     mock_engine = MagicMock()
 
@@ -140,10 +140,10 @@ class TestVllmSamplerInference(unittest.TestCase):
     asyncio.run(run_err_test())
 
 
-class TestVllmSamplerWeightSync(unittest.TestCase):
-  """Tests VllmSampler weight synchronization with duck-typed requests."""
+class TestRLVllmSamplerWeightSync(unittest.TestCase):
+  """Tests RLVllmSampler weight synchronization with duck-typed requests."""
 
-  @patch("tpu_inference.rl.vllm_sampler.VllmSampler._get_tpu_workers")
+  @patch("tpu_inference.rl.vllm_sampler.RLVllmSampler._get_tpu_workers")
   def test_weight_sync_calls_tpu_worker_apis(self, mock_get_workers):
 
     mock_worker_0 = MagicMock()
@@ -151,7 +151,7 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
     mock_get_workers.return_value = [mock_worker_0, mock_worker_1]
 
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B", tensor_parallel_size=2)
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
 
     mock_engine = MagicMock()
     mock_engine.pause_background_loop = AsyncMock()
@@ -192,7 +192,7 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
     """Verifies get_weight_sync_metadata structure."""
     async def run_test():
       config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B", tensor_parallel_size=4)
-      sampler = VllmSampler(config=config)
+      sampler = RLVllmSampler(config=config)
 
       metadata = await sampler.get_weight_sync_metadata()
       self.assertEqual(metadata["sharding"], "4x1")
@@ -204,7 +204,7 @@ class TestVllmSamplerWeightSync(unittest.TestCase):
   def test_pause_resume_and_clear_cache(self):
     """Verifies engine background loop control and prefix cache clearing."""
     config = VllmSamplerConfig(model_path="Qwen/Qwen2.5-1.5B")
-    sampler = VllmSampler(config=config)
+    sampler = RLVllmSampler(config=config)
     mock_engine = MagicMock()
     mock_engine.pause_background_loop = AsyncMock()
     mock_engine.resume_background_loop = AsyncMock()

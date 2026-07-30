@@ -118,7 +118,10 @@ def test_main_output_path_and_include_path(monkeypatch, tmp_path):
 
     class FakeEvaluationTracker:
 
-        def __init__(self, output_path, ):
+        def __init__(
+            self, 
+            output_path, 
+        ):
             self.output_path = output_path
 
     fake_loggers = types.SimpleNamespace(

@@ -341,4 +341,13 @@ fi
 # ensures the Docker build steps appear at the very top of the UI.
 upload_with_priority .buildkite/pipeline_build.yml "$JOB_PRIORITY"
 
+if [ "$BUILDKITE_PULL_REQUEST" != "false" ] && [ -n "${FILES_CHANGED:-}" ]; then
+    CHANGED_YMLS=$(echo "$FILES_CHANGED" | grep -E '^\.buildkite/.*\.y*ml$' || true)
+    if [ -n "$CHANGED_YMLS" ]; then
+        echo "Found changed YAML files in PR. Uploading outcome validation step..."
+        upload_with_priority .buildkite/validate_step_outcomes.yml "$JOB_PRIORITY"
+    fi
+fi
+
+
 echo "--- Buildkite Bootstrap Finished"

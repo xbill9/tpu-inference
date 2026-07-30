@@ -181,7 +181,7 @@ if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
 
     # Move the server log from /tmp (saved by run_multihost.sh) to artifacts folder
     if [ -f /tmp/vllm_serve.log ]; then
-        mv /tmp/vllm_serve.log "$LOG_FOLDER/vllm_log.txt"
+        mv -f /tmp/vllm_serve.log "$LOG_FOLDER/vllm_log.txt"
     fi
 else
     echo "--- Running job in docker via run_in_docker.sh (Single-Host Mode)"

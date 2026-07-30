@@ -495,7 +495,7 @@ class KernelTunerBase(ABC):
 
             tunable_params = self.tuner_config.tunable_params_class(
                 **suggested)
-            params_key = tuple(sorted(suggested.items()))
+            params_key = tuple(sorted(asdict(tunable_params).items()))
             cid = params_to_case_id.get(params_key, None)
             if cid is None:
                 # This means optuna returns an invalid combination
@@ -524,9 +524,10 @@ class KernelTunerBase(ABC):
 
             # --- skip if this exact case was already measured ---
             if cid in processed_ids:
-                raise Exception(
-                    f'{cid=} {tuning_key=} {tunable_params=} is already processed and Optuna should not suggest again'
+                logger.info(
+                    f'{cid=} {tuning_key=} {tunable_params=} is already processed; pruning duplicate Optuna trial.'
                 )
+                raise optuna.exceptions.TrialPruned()
 
             self._cleanup_xprof_dir()
             begin_trial_perf = time.perf_counter_ns()
@@ -535,7 +536,6 @@ class KernelTunerBase(ABC):
             status, warmup_ns, _ = self.run(tuning_key,
                                             tunable_params,
                                             iters=1)
-            warmup_us = int(warmup_ns // 1000)
             # status from self.run can only be SUCCESS or FAIL_OOM. Other unknow exception will raise exception in self.run so we don't fail silently
             if status != TuningStatus.SUCCESS:
                 logger.warning(
@@ -553,6 +553,8 @@ class KernelTunerBase(ABC):
                     self.storage_manager.save_results_batch(results_buffer)
                     del results_buffer[:]
                 raise optuna.exceptions.TrialPruned()
+
+            warmup_us = int(warmup_ns // 1000)
 
             # --- measurement (100 iterations) ---
             measurement_iters = 100
@@ -640,14 +642,18 @@ class KernelTunerBase(ABC):
             t for t in study.trials
             if t.state == optuna.trial.TrialState.COMPLETE
         ]
+        if completed_trials:
+            best_info = (f"Best latency: {study.best_value}us, "
+                         f"best params: {study.best_params}. ")
+        else:
+            best_info = "No trials completed successfully. "
         logger.info(
             f"Worker [{worker_id}] Bayesian optimization complete for "
             f"CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}, "
             f"tuning key: {tuning_key}. "
             f"Trials: {len(completed_trials)} completed / "
             f"{self.tuner_config.n_bayesian_trials} requested. "
-            f"Best latency: {study.best_value}us, "
-            f"best params: {study.best_params}. "
+            f"{best_info}"
             f"Total time: {bucket_total_time_us/1e6:.2f}s.")
 
     @abstractmethod

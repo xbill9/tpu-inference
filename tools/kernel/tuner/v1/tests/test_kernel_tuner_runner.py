@@ -83,7 +83,9 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
                 f"TPU_CORES must be an integer, got {tpu_cores_str!r}.")
         return tpu_version, tpu_cores
 
-    def _make_run_config(self, kernel_tuner_name: str) -> RunConfig:
+    def _make_run_config(self,
+                         kernel_tuner_name: str,
+                         use_bayesian_optimization: bool = False) -> RunConfig:
         """Builds a RunConfig with run_locally=True from TPU env vars."""
         tpu_version, tpu_cores = self._get_tpu_env()
         try:
@@ -104,6 +106,7 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
             tpu_queue_multi=tpu_queue_multi,
             run_locally=True,
             job_bucket_size=100,
+            use_bayesian_optimization=use_bayesian_optimization,
         )
 
     def _run_tuner_smoke_test(self, kernel_tuner_name: str) -> None:
@@ -187,13 +190,12 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
             at most one DB entry).
           - Every recorded status is acceptable (SUCCESS, FAILED_OOM, SKIPPED).
         """
-        run_config = self._make_run_config(kernel_tuner_name)
+        run_config = self._make_run_config(kernel_tuner_name,
+                                           use_bayesian_optimization=True)
         kernel_tuner_cls = KERNEL_TUNER_REGISTRY[kernel_tuner_name]
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             kernel_tuner = kernel_tuner_cls(run_config=run_config)
-            # Force Bayesian mode with a very small trial budget for speed.
-            kernel_tuner.tuner_config.support_bayesian_optimization = True
             kernel_tuner.tuner_config.n_bayesian_trials = n_trials
             kernel_tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
 

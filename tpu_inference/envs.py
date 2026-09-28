@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     MOE_STAGE_WEIGHTS_ON_HOST: bool = False
     W4A16_MOE_BF16_SCALES: bool = False
     W4A16_MOE_NO_PAD: bool = False
+    SKIP_IDENTITY_MODEL_JIT: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -364,6 +365,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # width is not a multiple of 256, and the activation runs in JAX.
     "W4A16_MOE_NO_PAD":
     env_bool("W4A16_MOE_NO_PAD", default=False),
+    # After loading real weights, skip the jitted pass over the model state
+    # when no Qwix quantization is configured. Without Qwix that pass is an
+    # identity, but it can still materialize a second copy of every weight,
+    # which does not fit when the weights fill most of the chip.
+    "SKIP_IDENTITY_MODEL_JIT":
+    env_bool("SKIP_IDENTITY_MODEL_JIT", default=False),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

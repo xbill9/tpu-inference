@@ -302,9 +302,16 @@ def _get_nnx_model(
                 model.load_weights(rng)
             if hasattr(vllm_config, "pytorch_pooler"):
                 del vllm_config.pytorch_pooler
-            jit_model = create_jit_model(
-                model,
-                use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
+            if (envs.SKIP_IDENTITY_MODEL_JIT
+                    and not vllm_config.additional_config.get("quantization")):
+                # create_jit_model only applies Qwix; with none configured
+                # the loaded model is already the result.
+                logger.info("Skipping the identity jit over the loaded model")
+                jit_model = model
+            else:
+                jit_model = create_jit_model(
+                    model,
+                    use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
     return jit_model
 
 

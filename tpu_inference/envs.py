@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     W4A16_MOE_NO_PAD: bool = False
     SKIP_IDENTITY_MODEL_JIT: bool = False
     EMBED_INT8_GROUP: int = 0
+    GMM_V2_TILE_VMEM_FRACTION: float = 1.0
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -378,6 +379,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 262144 x 2816 vocabulary at 32).
     "EMBED_INT8_GROUP":
     lambda: int(os.getenv("EMBED_INT8_GROUP", "0")),
+    # gmm_v2 picks tiles against its full scoped-VMEM limit, and its estimate
+    # leaves out in-kernel temporaries; below 1.0, tiles are chosen against
+    # this fraction of the limit while the compiler keeps the full limit.
+    "GMM_V2_TILE_VMEM_FRACTION":
+    lambda: float(os.getenv("GMM_V2_TILE_VMEM_FRACTION", "1.0")),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

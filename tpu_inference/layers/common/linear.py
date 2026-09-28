@@ -16,15 +16,30 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
+from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import (calculate_tiling,
+                                                         gmm_v2)
 
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+
+def gmm_v2_tiling(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act=None):
+    """calculate_tiling against GMM_V2_TILE_VMEM_FRACTION of the VMEM limit."""
+    return calculate_tiling(
+        dims, lhs_cfgs, rhs_cfgs,
+        int(vmem_limit_bytes * envs.GMM_V2_TILE_VMEM_FRACTION), fuse_act)
+
+
+def gmm_tile_info():
+    """tile_info for gmm_v2: the stock heuristic unless a fraction is set."""
+    return (calculate_tiling
+            if envs.GMM_V2_TILE_VMEM_FRACTION >= 1.0 else gmm_v2_tiling)
 
 
 def xla_quantized_matmul(
@@ -232,6 +247,7 @@ def sharded_quantized_matmul(x: jax.Array,
                 zero_initialize=False,
                 preferred_element_type=x.dtype,
                 maybe_quantize_lhs=maybe_quantize_x,
+                tile_info=gmm_tile_info(),
             )
         else:
             output = xla_quantized_matmul(x,

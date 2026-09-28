@@ -122,6 +122,29 @@ def gmm_wrapper(lhs,
     return gmm_res
 
 
+def _gate_up_act(gate_up: jax.Array, activation: str,
+                 out_dtype: jnp.dtype) -> jax.Array:
+    """act(gate) * up for a gmm1 output laid out as [gate | up], unfused.
+
+    Mirrors gmm_v2's fused activations for the names it supports; the fused
+    path splits interleaved lane chunks instead, which needs the intermediate
+    dim padded to a multiple of 128. Pass gate_up in float32, as the fused
+    kernel's accumulator is, so that only the product is rounded.
+    """
+    gate, up = jnp.split(gate_up, 2, axis=-1)
+    match activation:
+        case "silu":
+            act = jax.nn.silu(gate)
+        case "gelu":
+            act = jax.nn.gelu(gate)
+        case "gelu_tanh":
+            act = jax.nn.gelu(gate, approximate=True)
+        case _:
+            raise NotImplementedError(
+                f"Unfused gmm1 does not support activation {activation}")
+    return (act * up).astype(out_dtype)
+
+
 def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
                     group_start: jax.Array, group_end: jax.Array) -> jax.Array:
     """Mask indicating rows processed by current shard."""
@@ -187,6 +210,10 @@ def moe_gmm_local(x: jax.Array,
     assert parallelism in ["tp", "ep"]
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
+    # The fused activation needs w1's output width to be a multiple of
+    # 2 * 128 lanes; an unpadded intermediate dim (W4A16_MOE_NO_PAD) takes
+    # the activation outside the kernel instead.
+    fuse_act = activation if w1.shape[-1] % 256 == 0 else None
     gmm1_res = gmm_wrapper(
         x,
         w1,
@@ -194,9 +221,11 @@ def moe_gmm_local(x: jax.Array,
         w1_bias,
         group_sizes,
         group_offset,
-        fuse_act=activation,
-        preferred_element_type=x.dtype,
+        fuse_act=fuse_act,
+        preferred_element_type=x.dtype if fuse_act else jnp.float32,
     )
+    if fuse_act is None:
+        gmm1_res = _gate_up_act(gmm1_res, activation, x.dtype)
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
     # once, not applying to every shard. So we set w2_bias to 0 to all shards other than

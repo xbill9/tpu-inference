@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
     MOE_STAGE_WEIGHTS_ON_HOST: bool = False
+    W4A16_MOE_BF16_SCALES: bool = False
+    W4A16_MOE_NO_PAD: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -352,6 +354,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # stage the full tensor on device regardless.
     "MOE_STAGE_WEIGHTS_ON_HOST":
     env_bool("MOE_STAGE_WEIGHTS_ON_HOST", default=False),
+    # W4A16 routed experts: keep the checkpoint's bf16 group scales on the
+    # device instead of widening them to float32. Halves the scale footprint;
+    # gmm_v2 multiplies in the activation dtype either way.
+    "W4A16_MOE_BF16_SCALES":
+    env_bool("W4A16_MOE_BF16_SCALES", default=False),
+    # W4A16 routed experts: do not pad the intermediate dim to a multiple of
+    # 128. gmm1 then runs without the fused activation whenever its output
+    # width is not a multiple of 256, and the activation runs in JAX.
+    "W4A16_MOE_NO_PAD":
+    env_bool("W4A16_MOE_NO_PAD", default=False),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

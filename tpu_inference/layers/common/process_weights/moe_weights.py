@@ -272,6 +272,8 @@ def process_moe_weights(
     w13_reorder_size: int | None = None,
     w13_interleave: bool = False,
     disable_weight_requantization: bool = False,
+    scale_dtype: jnp.dtype = jnp.float32,
+    w13_align: int = 128,
 ) -> FusedMoEWeights:
     """Process fused moe weights to a layout that moe backend expects.
 
@@ -287,6 +289,9 @@ def process_moe_weights(
             we uninterleave so that first half is w1 and second half is w3.
         disable_weight_requantization: whether to keep scales broad for GMM
             setups.
+        scale_dtype: dtype the weight scales are stored in on the device.
+        w13_align: GMM backends pad each w13 shard's intermediate dim to a
+            multiple of this.
 
     Returns:
         MoE weights that are processed for specified backend.
@@ -331,12 +336,12 @@ def process_moe_weights(
     if w13_weight_scale is not None:
         # For block scales (experts, out_blocks, in_blocks), we need to maintain
         # the block dims
-        w13_weight_scale = w13_weight_scale.astype(jnp.float32)
+        w13_weight_scale = w13_weight_scale.astype(scale_dtype)
         w13_weight_scale = jnp.swapaxes(w13_weight_scale, 1, 2)
         w13_weight_scale = jnp.expand_dims(w13_weight_scale, 2)
 
     if w2_weight_scale is not None:
-        w2_weight_scale = w2_weight_scale.astype(jnp.float32)
+        w2_weight_scale = w2_weight_scale.astype(scale_dtype)
         w2_weight_scale = jnp.swapaxes(w2_weight_scale, 1, 2)
         w2_weight_scale = jnp.expand_dims(w2_weight_scale, 2)
 
@@ -426,7 +431,7 @@ def process_moe_weights(
 
             pad_config_weight = get_w13_padding_config(intermediate_size,
                                                        w13_reorder_size,
-                                                       align=128)
+                                                       align=w13_align)
 
             padded_output_sizes = [
                 pad_config_weight.padded_intermediate_size,
@@ -444,7 +449,7 @@ def process_moe_weights(
                 pad_config_scale = get_w13_padding_config(
                     intermediate_size,
                     w13_reorder_size,
-                    align=128,
+                    align=w13_align,
                     outer_block_size=w13_outer_block_size)
                 padded_output_sizes_scales = [
                     pad_config_scale.padded_intermediate_size,
@@ -482,7 +487,7 @@ def process_moe_weights(
         case MoEBackend.GMM_EP:
             pad_config_weight = get_w13_padding_config(intermediate_size,
                                                        reorder_size=1,
-                                                       align=128)
+                                                       align=w13_align)
 
             w13_weight = process_w13_for_gmm(tensor=w13_weight,
                                              concat_dim=2,
@@ -493,7 +498,7 @@ def process_moe_weights(
                 pad_config_scale = get_w13_padding_config(
                     intermediate_size,
                     reorder_size=1,
-                    align=128,
+                    align=w13_align,
                     outer_block_size=w13_outer_block_size)
                 w13_weight_scale = process_w13_for_gmm(tensor=w13_weight_scale,
                                                        concat_dim=3,

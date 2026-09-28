@@ -45,6 +45,7 @@ from flax import nnx
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference import envs
 from tpu_inference.layers.common.linear import sharded_quantized_matmul
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.linear_weights import (
@@ -549,6 +550,9 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
                 w13_reorder_size=get_mesh_shape_product(
                     layer.mesh, ShardingAxisName.MLP_TENSOR),
                 w13_interleave=False,
+                scale_dtype=(jnp.bfloat16 if envs.W4A16_MOE_BF16_SCALES
+                             else jnp.float32),
+                w13_align=1 if envs.W4A16_MOE_NO_PAD else 128,
             )
             for name in staged:
                 delattr(layer, name)

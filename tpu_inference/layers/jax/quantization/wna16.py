@@ -566,6 +566,14 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
         weights = shard_moe_weights(weights,
                                     moe_backend=layer.moe_backend,
                                     mesh=layer.mesh)
+        if envs.W4A16_MOE_BF16_SCALES:
+            # [E, groups, 1, N] -> [E, 1, groups, N]. A size-1 dim second
+            # from minor is padded to the bf16 sublane packing, which makes a
+            # bf16 scale as large as a float32 one; the forward swaps back.
+            weights.w13_weight_scale = jnp.swapaxes(weights.w13_weight_scale,
+                                                    1, 2)
+            weights.w2_weight_scale = jnp.swapaxes(weights.w2_weight_scale, 1,
+                                                   2)
         layer.kernel_gating_upproj_EDF = nnx.Param(weights.w13_weight)
         layer.kernel_gating_upproj_EDF_weight_scale = nnx.Param(
             weights.w13_weight_scale)
@@ -586,12 +594,19 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
             x_TD,
             jax.sharding.NamedSharding(layer.mesh,
                                        P(*layer.activation_ffw_td)))
+        w13_scale = layer.kernel_gating_upproj_EDF_weight_scale[...]
+        w2_scale = layer.kernel_down_proj_EFD_weight_scale[...]
+        if envs.W4A16_MOE_BF16_SCALES:
+            # Stored [E, 1, groups, N] in bf16; gmm_v2 wants [E, groups, 1, N]
+            # and widens to float32 anyway, so do both here, per layer.
+            w13_scale = jnp.swapaxes(w13_scale, 1, 2).astype(jnp.float32)
+            w2_scale = jnp.swapaxes(w2_scale, 1, 2).astype(jnp.float32)
         weights = FusedMoEWeights(
             w13_weight=layer.kernel_gating_upproj_EDF[...],
-            w13_weight_scale=layer.kernel_gating_upproj_EDF_weight_scale[...],
+            w13_weight_scale=w13_scale,
             w13_bias=None,
             w2_weight=layer.kernel_down_proj_EFD[...],
-            w2_weight_scale=layer.kernel_down_proj_EFD_weight_scale[...],
+            w2_weight_scale=w2_scale,
             w2_bias=None,
         )
         return moe_apply(layer, x_TD, router_logits, weights,

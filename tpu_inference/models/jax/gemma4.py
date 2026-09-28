@@ -24,7 +24,7 @@ from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import WeightsMapper
 
-from tpu_inference import envs, utils
+from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -1070,13 +1070,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                            if not hasattr(self, 'lm_head') else []),
             skip_substrs=["vision", "audio", "multi_modal"],
         )
-        loaded = loader.load_weights(mapper.apply(weights))
-        embed = getattr(self.language_model, "embed_tokens", None)
-        if envs.EMBED_INT8_GROUP and isinstance(embed, JaxEmbed):
-            embed.quantize_int8(envs.EMBED_INT8_GROUP)
-            logger.info("embed_tokens stored as int8, group %d",
-                        envs.EMBED_INT8_GROUP)
-        return loaded
+        return loader.load_weights(mapper.apply(weights))
 
     def __call__(
         self,

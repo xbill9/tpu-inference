@@ -302,6 +302,8 @@ def _get_nnx_model(
                 model.load_weights(rng)
             if hasattr(vllm_config, "pytorch_pooler"):
                 del vllm_config.pytorch_pooler
+            if envs.EMBED_INT8_GROUP:
+                _quantize_token_embedding(model, envs.EMBED_INT8_GROUP)
             if (envs.SKIP_IDENTITY_MODEL_JIT
                     and not vllm_config.additional_config.get("quantization")):
                 # create_jit_model only applies Qwix; with none configured
@@ -313,6 +315,17 @@ def _get_nnx_model(
                     model,
                     use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
     return jit_model
+
+
+def _quantize_token_embedding(model: nnx.Module, group: int) -> None:
+    """EMBED_INT8_GROUP: store every `embed_tokens` JaxEmbed as int8."""
+    from tpu_inference.layers.jax.embed import JaxEmbed
+    for path, module in nnx.iter_graph(model):
+        if (isinstance(module, JaxEmbed) and path
+                and path[-1] == "embed_tokens"):
+            module.quantize_int8(group)
+            logger.info("%s stored as int8, group %d",
+                        ".".join(map(str, path)), group)
 
 
 def _not_support(*args, **kwargs):

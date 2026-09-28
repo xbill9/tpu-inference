@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     W4A16_MOE_BF16_SCALES: bool = False
     W4A16_MOE_NO_PAD: bool = False
     SKIP_IDENTITY_MODEL_JIT: bool = False
+    EMBED_INT8_GROUP: int = 0
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -371,6 +372,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which does not fit when the weights fill most of the chip.
     "SKIP_IDENTITY_MODEL_JIT":
     env_bool("SKIP_IDENTITY_MODEL_JIT", default=False),
+    # When > 0, a tied token embedding is stored after loading as int8 with
+    # one bf16 scale per this many columns; lookups and the tied LM head
+    # dequantize on the fly. Halves the table (1.38 -> 0.73 GiB for a
+    # 262144 x 2816 vocabulary at 32).
+    "EMBED_INT8_GROUP":
+    lambda: int(os.getenv("EMBED_INT8_GROUP", "0")),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

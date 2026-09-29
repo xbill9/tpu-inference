@@ -39,7 +39,8 @@ from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
-    Fp8TensorwiseMergedLinearMethod)
+    Fp8TensorwiseMergedLinearMethod, Int8ChannelwiseLinearMethod,
+    Int8ChannelwiseMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.layers.jax.quantization.wna16 import (
@@ -206,6 +207,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             if isinstance(layer, JaxMergedColumnParallelLinear):
                 return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
+
+        if (self._ct._is_dynamic_token_w8a8(weight_quant, input_quant)
+                and weight_quant.type == "int"
+                and weight_quant.strategy == "channel"
+                and input_quant.symmetric):
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                return Int8ChannelwiseMergedLinearMethod(layer, linear_config)
+            return Int8ChannelwiseLinearMethod(layer, linear_config)
 
         if _is_w4a16(weight_quant, input_quant):
             _check_w4a16_layout(scheme, weight_quant, self._ct, prefix)

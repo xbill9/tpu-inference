@@ -57,6 +57,11 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
                                 common_fp8.Fp8LinearMethod):
     """Tensor-wise Fp8 method for JAX Linear layer."""
 
+    # Per-output-channel scale; sharded_quantized_matmul quantizes the
+    # activation to this dtype per token, so an integer dtype runs an integer
+    # matmul (int8 x int8 -> int32 on the MXU).
+    WEIGHT_DTYPE = jnp.float8_e4m3fn
+
     def __init__(self, layer: JaxEinsum, linear_config: QuantLinearConfig):
         common_fp8.Fp8LinearMethod.__init__(self, linear_config)
 
@@ -85,7 +90,7 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
 
         layer.weight = create_param(rngs,
                                     shape=self.kernel_shape,
-                                    dtype=jnp.float8_e4m3fn,
+                                    dtype=self.WEIGHT_DTYPE,
                                     sharding=self.weight_sharding)
 
         layer.weight.set_metadata(
@@ -205,6 +210,17 @@ class Fp8TensorwiseMergedLinearMethod(Fp8TensorwiseLinearMethod):
                               reshape_dims=(-1, ),
                               permute_dims=None,
                               param_name=layer.prefix + ".weight_scale"))
+
+
+class Int8ChannelwiseLinearMethod(Fp8TensorwiseLinearMethod):
+    """compressed-tensors int8 W8A8: int8 weights with a per-channel scale and
+    activations quantized to int8 per token at run time."""
+    WEIGHT_DTYPE = jnp.int8
+
+
+class Int8ChannelwiseMergedLinearMethod(Fp8TensorwiseMergedLinearMethod):
+    """Int8ChannelwiseLinearMethod for fused gate_up / qkv layers."""
+    WEIGHT_DTYPE = jnp.int8
 
 
 class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):

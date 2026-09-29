@@ -412,6 +412,11 @@ class Gemma4MultiTokenPredictor(JaxModule):
         text_config = draft_config.text_config
         self.config = text_config
         dtype = vllm_config.model_config.dtype
+        # vllm_config.quant_config is the target's. The assistant checkpoints
+        # are bf16, so a quantized target must not make the drafter expect
+        # packed or int8 weights.
+        quant_config = (vllm_config.quant_config if getattr(
+            draft_config, "quantization_config", None) else None)
 
         self.hidden_size = text_config.hidden_size
         self.backbone_hidden_size = getattr(draft_config,
@@ -426,7 +431,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
             param_dtype=dtype,
             embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
             rngs=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
             prefix=prefix + ".embed_tokens",
         )
 
@@ -436,7 +441,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
             use_bias=False,
             param_dtype=dtype,
             rngs=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
             prefix=prefix + ".pre_projection",
         )
 
@@ -446,7 +451,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
             use_bias=False,
             param_dtype=dtype,
             rngs=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
             prefix=prefix + ".post_projection",
         )
 
@@ -459,7 +464,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
                 rng=rng,
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.layers.{layer_index}",
             ),
         )
@@ -470,7 +475,7 @@ class Gemma4MultiTokenPredictor(JaxModule):
             param_dtype=dtype,
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
             prefix=prefix + ".norm",
         )
 

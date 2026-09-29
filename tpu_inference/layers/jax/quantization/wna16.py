@@ -337,6 +337,11 @@ class WNA16MergedLinearMethod(WNA16LinearMethod):
                                               [None] * n_proj)
 
 
+def _pad_columns(x: jax.Array, multiple: int) -> jax.Array:
+    pad = -x.shape[-1] % multiple
+    return jnp.pad(x, ((0, 0), (0, pad))) if pad else x
+
+
 class WNA16EmbedMethod(QuantizeMethodBase):
     """Symmetric int4 embedding table, for ``JaxEmbed``.
 
@@ -413,6 +418,12 @@ class WNA16EmbedMethod(QuantizeMethodBase):
             raise TypeError(f"{self.prefix}.weight_scale is {scale.dtype}.")
         for name in _CHECKPOINT_PARAMS:
             delattr(layer, name)
+        # Rows a multiple of 128 lanes wide: gathering more than one row of
+        # a narrower int32 table reads the whole table on v5e (E2B per-layer
+        # table, 1120 words: 4.2 ms at any id count; padded to 1152: 0.06 ms).
+        with cpu_mesh_context():
+            packed = _pad_columns(packed, 128)
+            scale = _pad_columns(scale, 128)
         layer.weight_packed = nnx.Param(shard_put(packed, ()))
         layer.weight_scale = nnx.Param(shard_put(scale, ()))
         self._processed = True
@@ -421,19 +432,16 @@ class WNA16EmbedMethod(QuantizeMethodBase):
     def _dequant(self, packed: jax.Array, scale: jax.Array) -> jax.Array:
         """int32 [..., D / 8] and scales [..., D / group] -> [..., D]."""
         lead = packed.shape[:-1]
+        packed = packed[..., :self.features // _PACK_FACTOR]
+        scale = scale[..., :self.num_groups]
         w = u32_unpack_i4(packed).astype(jnp.float32)
         w = w.reshape(*lead, self.num_groups, self.group_size)
         w = w * scale.astype(jnp.float32)[..., None]
         return w.reshape(*lead, self.features).astype(self.dtype)
 
     def apply_jax(self, layer: JaxModule, ids: jax.Array) -> jax.Array:
-        rows = (jnp.take(layer.weight_packed[...], ids, axis=0),
-                jnp.take(layer.weight_scale[...], ids, axis=0))
-        # Without the barrier XLA moves the unpacking ahead of the gather and
-        # unpacks the whole table every step once more than one id is looked
-        # up: on v5e 4.2 ms for the E2B per-layer table against 0.06 ms for
-        # the bf16 gather.
-        return self._dequant(*jax.lax.optimization_barrier(rows))
+        return self._dequant(jnp.take(layer.weight_packed[...], ids, axis=0),
+                             jnp.take(layer.weight_scale[...], ids, axis=0))
 
     _DECODE_CHUNK = 8192
 

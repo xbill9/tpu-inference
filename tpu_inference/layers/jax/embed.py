@@ -66,6 +66,8 @@ class JaxEmbed(nnx.Embed, JaxModule):
     def decode(self, x: jax.Array) -> jax.Array:
         if getattr(self, "int8_group", 0):
             return self._int8_decode(x)
+        if self.quant_method is not None:
+            return self.quant_method.decode(self, x)
         return jax.numpy.dot(x, self.weight.value.T)
 
     # int8 storage (EMBED_INT8_GROUP): values [V, D] int8 and one bf16 scale

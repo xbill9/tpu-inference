@@ -67,7 +67,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantLinearConfig
 from tpu_inference.models.jax.utils.weight_utils import (
     assign_and_shard_param, jax_array_from_reshaped_torch,
-    load_nnx_param_from_reshaped_torch)
+    load_nnx_param_from_reshaped_torch, shard_put)
 from tpu_inference.utils import get_mesh_shape_product
 
 # The three tensors a compressed-tensors pack-quantized linear layer ships.
@@ -211,6 +211,9 @@ class WNA16LinearMethod(QuantizeMethodBase):
             weight, scale = unpack_wna16_linear_weight(
                 layer.weight_packed[...], layer.weight_scale[...],
                 self.in_features)
+            # The loader keeps the checkpoint's float dtype; some exports
+            # write fp16 scales (an int4 lm_head), the kernel path takes bf16.
+            scale = scale.astype(jnp.bfloat16)
             output_sizes = self.linear_config.output_sizes
             n_shards = self.linear_config.n_shards
             if len(output_sizes) > 1 and n_shards > 1:
@@ -331,6 +334,113 @@ class WNA16MergedLinearMethod(WNA16LinearMethod):
         for name in _CHECKPOINT_PARAMS:
             getattr(layer, name).set_metadata("_merged_shards",
                                               [None] * n_proj)
+
+
+class WNA16EmbedMethod(QuantizeMethodBase):
+    """Symmetric int4 embedding table, for ``JaxEmbed``.
+
+    The checkpoint holds the table as a pack-quantized linear would:
+    ``weight_packed`` int32 ``[V, D / 8]`` and ``weight_scale`` ``[V, D /
+    group]``. Both stay packed on the device, so the table costs half a byte
+    per value plus its scales; a lookup unpacks and scales only the gathered
+    rows. Scales are stored in bf16 whatever the checkpoint's float dtype.
+    Tables are replicated, which is what a single-chip rig needs.
+    """
+
+    def __init__(self, layer: JaxModule, group_size: Optional[int],
+                 prefix: str):
+        self.prefix = prefix
+        self.num_embeddings = layer.num_embeddings
+        self.features = layer.features
+        if group_size is None or group_size <= 0:
+            group_size = self.features
+        if self.features % group_size or self.features % _PACK_FACTOR:
+            raise ValueError(
+                f"embedding width {self.features} is not a multiple of "
+                f"group_size {group_size} and of {_PACK_FACTOR}.")
+        self.group_size = group_size
+        self.num_groups = self.features // group_size
+        self.dtype = layer.param_dtype
+        self._processed = False
+
+    def create_weights_jax(self, layer: JaxModule, *weight_args,
+                           **extra_weight_attrs):
+        delattr(layer, "weight")
+        v = self.num_embeddings
+        for name, shape, dtype in (
+            ("weight_packed", (v, self.features // _PACK_FACTOR), jnp.int32),
+            ("weight_scale", (v, self.num_groups), jnp.bfloat16),
+        ):
+            param = nnx.Param(jnp.zeros(shape, dtype),
+                              weight_loader=functools.partial(
+                                  load_nnx_param_from_reshaped_torch,
+                                  permute_dims=(0, 1),
+                                  param_name=f"{self.prefix}.{name}"),
+                              eager_sharding=False)
+            param.set_metadata("out_sharding", ())
+            param.set_metadata("mesh", cpu_mesh())
+            setattr(layer, name, param)
+        param = nnx.Param(jnp.zeros((2, ), jnp.int32),
+                          weight_loader=self._check_weight_shape,
+                          eager_sharding=False)
+        param.set_metadata("mesh", cpu_mesh())
+        layer.weight_shape = param
+
+    def _check_weight_shape(self, param: nnx.Param, torch_tensor, *_):
+        got = tuple(int(v) for v in torch_tensor.reshape(-1).tolist())
+        if got != (self.num_embeddings, self.features):
+            raise ValueError(f"{self.prefix}.weight_shape is {got}, expected "
+                             f"{(self.num_embeddings, self.features)}.")
+        param.set_metadata("_is_loaded", True)
+
+    def process_weights_after_loading(self, layer: JaxModule) -> bool:
+        # One method per layer; JaxEmbed answers every missing attribute, so
+        # the layer cannot say whether it was already processed.
+        if self._processed:
+            return True
+        if not all(
+                getattr(layer, name).get_metadata("_is_loaded", False)
+                for name in _CHECKPOINT_PARAMS):
+            return False
+        packed = layer.weight_packed[...]
+        if not jnp.issubdtype(packed.dtype, jnp.integer):
+            raise TypeError("Packed int4 embeddings must be an integer "
+                            f"dtype, got {packed.dtype}.")
+        with cpu_mesh_context():
+            scale = layer.weight_scale[...].astype(jnp.bfloat16)
+        for name in _CHECKPOINT_PARAMS:
+            delattr(layer, name)
+        layer.weight_packed = nnx.Param(shard_put(packed, ()))
+        layer.weight_scale = nnx.Param(shard_put(scale, ()))
+        self._processed = True
+        return True
+
+    def _dequant(self, packed: jax.Array, scale: jax.Array) -> jax.Array:
+        """int32 [..., D / 8] and scales [..., D / group] -> [..., D]."""
+        lead = packed.shape[:-1]
+        w = u32_unpack_i4(packed).astype(jnp.float32)
+        w = w.reshape(*lead, self.num_groups, self.group_size)
+        w = w * scale.astype(jnp.float32)[..., None]
+        return w.reshape(*lead, self.features).astype(self.dtype)
+
+    def apply_jax(self, layer: JaxModule, ids: jax.Array) -> jax.Array:
+        return self._dequant(jnp.take(layer.weight_packed[...], ids, axis=0),
+                             jnp.take(layer.weight_scale[...], ids, axis=0))
+
+    _DECODE_CHUNK = 8192
+
+    def decode(self, layer: JaxModule, x: jax.Array) -> jax.Array:
+        """x @ W.T with W dequantized a vocabulary chunk at a time."""
+        packed, scale = layer.weight_packed[...], layer.weight_scale[...]
+        v = packed.shape[0]
+        c = self._DECODE_CHUNK if v % self._DECODE_CHUNK == 0 else v
+
+        def chunk(args):
+            return jnp.dot(x, self._dequant(*args).T)
+
+        out = jax.lax.map(chunk, (packed.reshape(v // c, c, -1),
+                                  scale.reshape(v // c, c, -1)))
+        return jnp.moveaxis(out, 0, -2).reshape(*x.shape[:-1], v)
 
 
 WNA16_MOE_SUPPORTED_BACKENDS = [MoEBackend.GMM_EP, MoEBackend.GMM_TP]

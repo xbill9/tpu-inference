@@ -824,11 +824,12 @@ class Gemma4Model(JaxModule):
             # the same shape — explicit permute_dims=(0,1) suppresses the
             # default 2D-transpose that load_nnx_param_from_reshaped_torch
             # applies when permute_dims is None.
-            self.embed_tokens_per_layer.weight.set_metadata(
-                "weight_loader",
-                partial(load_nnx_param_from_reshaped_torch,
-                        permute_dims=(0, 1),
-                        param_name=prefix + ".embed_tokens_per_layer.weight"))
+            if self.embed_tokens_per_layer.quant_method is None:
+                self.embed_tokens_per_layer.weight.set_metadata(
+                    "weight_loader",
+                    partial(load_nnx_param_from_reshaped_torch,
+                            permute_dims=(0, 1),
+                            param_name=prefix + ".embed_tokens_per_layer.weight"))
             # per_layer_model_projection: H -> L*P. ColumnParallelLinear
             # with gather_output=True in vllm; we replicate output.
             self.per_layer_model_projection = JaxEinsum(
@@ -1058,13 +1059,30 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             if self.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = _text_config(model_config.hf_config).hidden_size
-                self.lm_head = JaxLmHead(
-                    hidden_size=hidden_size,
-                    vocab_size=vocab_size,
-                    dtype=model_config.dtype,
-                    rngs=rng,
-                    prefix="lm_head",
-                )
+                quant_config = vllm_config.quant_config
+                if getattr(quant_config, "quantizes",
+                           lambda _: False)("lm_head"):
+                    # A checkpoint that quantizes the untied head (int4
+                    # lm_head) needs a layer the quant config dispatches on.
+                    self.lm_head = JaxEinsum(
+                        "TD,DV->TV",
+                        (hidden_size, vocab_size),
+                        bias_shape=None,
+                        param_dtype=model_config.dtype,
+                        kernel_init=nnx.with_partitioning(
+                            init_fn, (None, "model")),
+                        rngs=rng,
+                        quant_config=quant_config,
+                        prefix="lm_head",
+                    )
+                else:
+                    self.lm_head = JaxLmHead(
+                        hidden_size=hidden_size,
+                        vocab_size=vocab_size,
+                        dtype=model_config.dtype,
+                        rngs=rng,
+                        prefix="lm_head",
+                    )
             else:
                 self.lm_head = PPMissingLayer()
 

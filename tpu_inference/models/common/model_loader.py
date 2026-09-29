@@ -322,7 +322,8 @@ def _quantize_token_embedding(model: nnx.Module, group: int) -> None:
     from tpu_inference.layers.jax.embed import JaxEmbed
     for path, module in nnx.iter_graph(model):
         if (isinstance(module, JaxEmbed) and path
-                and path[-1] == "embed_tokens"):
+                and path[-1] == "embed_tokens"
+                and module.quant_method is None):
             module.quantize_int8(group)
             logger.info("%s stored as int8, group %d",
                         ".".join(map(str, path)), group)

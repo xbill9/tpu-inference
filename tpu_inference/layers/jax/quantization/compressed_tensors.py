@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.config_utils import \
     is_equal_or_regex_match
 
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import (JaxEinsum,
                                              JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
@@ -44,7 +45,8 @@ from tpu_inference.layers.jax.quantization.fp8 import (
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 from tpu_inference.layers.jax.quantization.wna16 import (
-    WNA16FusedMoEMethod, WNA16LinearMethod, WNA16MergedLinearMethod)
+    WNA16EmbedMethod, WNA16FusedMoEMethod, WNA16LinearMethod,
+    WNA16MergedLinearMethod)
 
 
 class _Fp8BlockConfigShim:
@@ -143,6 +145,35 @@ class CompressedTensorsConfig(QuantizationConfig):
             return self._target_scheme_map["Linear"]
         return None
 
+    def quantizes(self, prefix: str) -> bool:
+        """Whether a config group targets ``prefix`` by name.
+
+        For layers that only exist quantized when the checkpoint says so
+        (an untied ``lm_head``), so the model can build the matching layer.
+        """
+        if should_ignore_layer(prefix,
+                               ignore=self._ignore,
+                               fused_mapping=self._fused_mapping):
+            return False
+        return any(
+            _check_equal_or_regex_match(prefix, [target])
+            for target in self._target_scheme_map)
+
+    def _embed_method(self, layer: JaxModule,
+                      prefix: str) -> Optional[QuantizeMethodBase]:
+        """An embedding table is quantized only when a group names it."""
+        if not self.quantizes(prefix):
+            return None
+        scheme = self._match_target(layer, prefix)
+        weight_quant = scheme.get("weights")
+        input_quant = scheme.get("input_activations")
+        if not _is_w4a16(weight_quant, input_quant):
+            raise NotImplementedError(
+                f"compressed-tensors scheme for embedding '{prefix}' is not "
+                "supported in the JAX path; only w4a16 is.")
+        _check_w4a16_layout(scheme, weight_quant, self._ct, prefix)
+        return WNA16EmbedMethod(layer, weight_quant.group_size, prefix)
+
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
@@ -169,6 +200,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     "not yet supported in the JAX path; only fp8 w8a8 and "
                     "w4a16 are.")
             return UnquantizedFusedMoEMethod(layer)
+        if isinstance(layer, JaxEmbed):
+            return self._embed_method(layer, prefix)
         if not isinstance(layer, JaxEinsum):
             return None
 

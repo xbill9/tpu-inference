@@ -208,7 +208,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
 
-        if (self._ct._is_dynamic_token_w8a8(weight_quant, input_quant)
+        if (weight_quant is not None and input_quant is not None
+                and self._ct._is_dynamic_token_w8a8(weight_quant, input_quant)
                 and weight_quant.type == "int"
                 and weight_quant.strategy == "channel"
                 and input_quant.symmetric):

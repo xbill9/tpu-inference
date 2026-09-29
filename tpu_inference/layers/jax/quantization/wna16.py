@@ -427,8 +427,13 @@ class WNA16EmbedMethod(QuantizeMethodBase):
         return w.reshape(*lead, self.features).astype(self.dtype)
 
     def apply_jax(self, layer: JaxModule, ids: jax.Array) -> jax.Array:
-        return self._dequant(jnp.take(layer.weight_packed[...], ids, axis=0),
-                             jnp.take(layer.weight_scale[...], ids, axis=0))
+        rows = (jnp.take(layer.weight_packed[...], ids, axis=0),
+                jnp.take(layer.weight_scale[...], ids, axis=0))
+        # Without the barrier XLA moves the unpacking ahead of the gather and
+        # unpacks the whole table every step once more than one id is looked
+        # up: on v5e 4.2 ms for the E2B per-layer table against 0.06 ms for
+        # the bf16 gather.
+        return self._dequant(*jax.lax.optimization_barrier(rows))
 
     _DECODE_CHUNK = 8192
 

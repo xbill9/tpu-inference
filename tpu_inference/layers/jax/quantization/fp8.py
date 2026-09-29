@@ -88,10 +88,17 @@ class Fp8TensorwiseLinearMethod(QuantizeMethodBase,
 
         out_features = sum(self.linear_config.output_sizes)
 
-        layer.weight = create_param(rngs,
-                                    shape=self.kernel_shape,
-                                    dtype=self.WEIGHT_DTYPE,
-                                    sharding=self.weight_sharding)
+        if jnp.issubdtype(self.WEIGHT_DTYPE, jnp.integer):
+            # create_param's default initializer is float-only; the loader
+            # overwrites the placeholder anyway.
+            layer.weight = nnx.Param(jnp.zeros(self.kernel_shape,
+                                               self.WEIGHT_DTYPE),
+                                     out_sharding=self.weight_sharding)
+        else:
+            layer.weight = create_param(rngs,
+                                        shape=self.kernel_shape,
+                                        dtype=self.WEIGHT_DTYPE,
+                                        sharding=self.weight_sharding)
 
         layer.weight.set_metadata(
             'weight_loader',

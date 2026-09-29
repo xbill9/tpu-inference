@@ -211,9 +211,10 @@ class WNA16LinearMethod(QuantizeMethodBase):
             weight, scale = unpack_wna16_linear_weight(
                 layer.weight_packed[...], layer.weight_scale[...],
                 self.in_features)
-            # The loader keeps the checkpoint's float dtype; some exports
-            # write fp16 scales (an int4 lm_head), the kernel path takes bf16.
-            scale = scale.astype(jnp.bfloat16)
+            if scale.dtype == jnp.float16:
+                # Some exports write fp16 scales (an int4 lm_head); float32
+                # holds them exactly, bf16 would round them.
+                scale = scale.astype(jnp.float32)
             output_sizes = self.linear_config.output_sizes
             n_shards = self.linear_config.n_shards
             if len(output_sizes) > 1 and n_shards > 1:
@@ -343,8 +344,9 @@ class WNA16EmbedMethod(QuantizeMethodBase):
     ``weight_packed`` int32 ``[V, D / 8]`` and ``weight_scale`` ``[V, D /
     group]``. Both stay packed on the device, so the table costs half a byte
     per value plus its scales; a lookup unpacks and scales only the gathered
-    rows. Scales are stored in bf16 whatever the checkpoint's float dtype.
-    Tables are replicated, which is what a single-chip rig needs.
+    rows. Scales keep the checkpoint's float dtype (fp16 and bf16 cost the
+    same, and rounding fp16 steps to bf16 would move every value off the
+    grid). Tables are replicated, which is what a single-chip rig needs.
     """
 
     def __init__(self, layer: JaxModule, group_size: Optional[int],
@@ -406,8 +408,9 @@ class WNA16EmbedMethod(QuantizeMethodBase):
         if not jnp.issubdtype(packed.dtype, jnp.integer):
             raise TypeError("Packed int4 embeddings must be an integer "
                             f"dtype, got {packed.dtype}.")
-        with cpu_mesh_context():
-            scale = layer.weight_scale[...].astype(jnp.bfloat16)
+        scale = layer.weight_scale[...]
+        if not jnp.issubdtype(scale.dtype, jnp.floating):
+            raise TypeError(f"{self.prefix}.weight_scale is {scale.dtype}.")
         for name in _CHECKPOINT_PARAMS:
             delattr(layer, name)
         layer.weight_packed = nnx.Param(shard_put(packed, ()))

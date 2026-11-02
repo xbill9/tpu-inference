@@ -15,7 +15,8 @@
 
 Composes (does not subclass) the upstream vLLM ``CompressedTensorsConfig`` to
 reuse its config-group parsing and scheme detection, then dispatches each layer
-to the existing JAX fp8 quant methods.
+to the existing JAX fp8 quant methods, or to the wNa16 method for weight-only
+int4 checkpoints.
 """
 
 from collections.abc import Iterable
@@ -30,17 +31,22 @@ from vllm.model_executor.layers.quantization.utils.config_utils import \
     is_equal_or_regex_match
 
 from tpu_inference.layers.jax import JaxModule
+from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import (JaxEinsum,
                                              JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
-from tpu_inference.layers.jax.quantization import QuantizeMethodBase
+from tpu_inference.layers.jax.quantization import QuantizeMethodBase, wna16
 from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
                                                            QuantLinearConfig)
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
-    Fp8TensorwiseMergedLinearMethod)
+    Fp8TensorwiseMergedLinearMethod, Int8ChannelwiseLinearMethod,
+    Int8ChannelwiseMergedLinearMethod)
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
+from tpu_inference.layers.jax.quantization.wna16 import (
+    WNA16EmbedMethod, WNA16FusedMoEMethod, WNA16LinearMethod,
+    WNA16MergedLinearMethod)
 
 
 class _Fp8BlockConfigShim:
@@ -58,6 +64,48 @@ def _weight_block_size(weight_quant) -> Optional[list[int]]:
     """Return [block_n, block_k], or None if the weights are not block-quantized."""
     block = getattr(weight_quant, "block_structure", None)
     return list(block) if block is not None else None
+
+
+def _is_w4a16(weight_quant, input_quant) -> bool:
+    """Static symmetric int4 weights (group or channel) with no activation
+    quantization: the layout ``WNA16LinearMethod`` unpacks."""
+    if input_quant is not None or weight_quant is None:
+        return False
+    strategy = str(
+        getattr(weight_quant.strategy, "value", weight_quant.strategy))
+    qtype = str(getattr(weight_quant.type, "value", weight_quant.type))
+    return (weight_quant.num_bits == 4 and qtype == "int"
+            and weight_quant.symmetric and not weight_quant.dynamic
+            and strategy in ("group", "channel"))
+
+
+def _check_w4a16_layout(scheme, weight_quant, ct, prefix: str) -> None:
+    """Reject w4a16 serializations the JAX methods do not unpack."""
+    fmt = scheme.get("format") or getattr(ct, "quant_format", None)
+    if fmt not in (None, "pack-quantized"):
+        raise NotImplementedError(
+            f"compressed-tensors w4a16 format '{fmt}' for layer '{prefix}' is "
+            "not supported in the JAX path; only 'pack-quantized' is.")
+    actorder = getattr(weight_quant, "actorder", None)
+    if str(getattr(actorder, "value", actorder)) == "group":
+        raise NotImplementedError(
+            f"compressed-tensors w4a16 with actorder=group (g_idx) for layer "
+            f"'{prefix}' is not supported in the JAX path.")
+
+
+def _wna16_moe_method(scheme, weight_quant, ct,
+                      prefix: str) -> WNA16FusedMoEMethod:
+    _check_w4a16_layout(scheme, weight_quant, ct, prefix)
+    group_size = weight_quant.group_size
+    if group_size is None or group_size <= 0 or not wna16._uses_kernel(
+            group_size):
+        # Channelwise or wide groups would take gmm_v2's dequantize-after-
+        # matmul branch, which quantizes the activation: no longer W4A16.
+        raise NotImplementedError(
+            f"compressed-tensors w4a16 MoE layer '{prefix}' has group_size "
+            f"{group_size}; the JAX path serves W4A16 experts only with "
+            "groups narrower than the MXU.")
+    return WNA16FusedMoEMethod(group_size)
 
 
 def _check_equal_or_regex_match(layer_name: str,
@@ -97,6 +145,35 @@ class CompressedTensorsConfig(QuantizationConfig):
             return self._target_scheme_map["Linear"]
         return None
 
+    def quantizes(self, prefix: str) -> bool:
+        """Whether a config group targets ``prefix`` by name.
+
+        For layers that only exist quantized when the checkpoint says so
+        (an untied ``lm_head``), so the model can build the matching layer.
+        """
+        if should_ignore_layer(prefix,
+                               ignore=self._ignore,
+                               fused_mapping=self._fused_mapping):
+            return False
+        return any(
+            _check_equal_or_regex_match(prefix, [target])
+            for target in self._target_scheme_map)
+
+    def _embed_method(self, layer: JaxModule,
+                      prefix: str) -> Optional[QuantizeMethodBase]:
+        """An embedding table is quantized only when a group names it."""
+        if not self.quantizes(prefix):
+            return None
+        scheme = self._match_target(layer, prefix)
+        weight_quant = scheme.get("weights")
+        input_quant = scheme.get("input_activations")
+        if not _is_w4a16(weight_quant, input_quant):
+            raise NotImplementedError(
+                f"compressed-tensors scheme for embedding '{prefix}' is not "
+                "supported in the JAX path; only w4a16 is.")
+        _check_w4a16_layout(scheme, weight_quant, self._ct, prefix)
+        return WNA16EmbedMethod(layer, weight_quant.group_size, prefix)
+
     def get_quant_method(self, layer: JaxModule,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
@@ -111,7 +188,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme.get("input_activations")
             if self._ct._is_fp8_w8a8(weight_quant, input_quant):
                 return Fp8FusedMoEMethod(_weight_block_size(weight_quant))
+            if _is_w4a16(weight_quant, input_quant):
+                return _wna16_moe_method(scheme, weight_quant, self._ct,
+                                         prefix)
+            if weight_quant is not None:
+                # Falling back to the unquantized method would read packed
+                # weights (e.g. asymmetric or 8-bit int experts) as dense ones and serve
+                # garbage; fail at load instead.
+                raise NotImplementedError(
+                    f"compressed-tensors scheme for MoE layer '{prefix}' is "
+                    "not yet supported in the JAX path; only fp8 w8a8 and "
+                    "w4a16 are.")
             return UnquantizedFusedMoEMethod(layer)
+        if isinstance(layer, JaxEmbed):
+            return self._embed_method(layer, prefix)
         if not isinstance(layer, JaxEinsum):
             return None
 
@@ -151,7 +241,24 @@ class CompressedTensorsConfig(QuantizationConfig):
                 return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
 
-        # TODO: w4a8 / wNa16 schemes need their own JAX methods (not yet ported).
+        if (weight_quant is not None and input_quant is not None
+                and self._ct._is_dynamic_token_w8a8(weight_quant, input_quant)
+                and weight_quant.type == "int"
+                and weight_quant.strategy == "channel"
+                and input_quant.symmetric):
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                return Int8ChannelwiseMergedLinearMethod(layer, linear_config)
+            return Int8ChannelwiseLinearMethod(layer, linear_config)
+
+        if _is_w4a16(weight_quant, input_quant):
+            _check_w4a16_layout(scheme, weight_quant, self._ct, prefix)
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                return WNA16MergedLinearMethod(layer, linear_config,
+                                               weight_quant.group_size)
+            return WNA16LinearMethod(layer, linear_config,
+                                     weight_quant.group_size)
+
+        # TODO: w4a8 and 8-bit / asymmetric wNa16 need their own JAX methods.
         raise NotImplementedError(
             f"compressed-tensors scheme for layer '{prefix}' is not yet "
             "supported in the JAX path.")

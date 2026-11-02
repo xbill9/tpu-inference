@@ -39,6 +39,11 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
     MOE_STAGE_WEIGHTS_ON_HOST: bool = False
+    W4A16_MOE_BF16_SCALES: bool = False
+    W4A16_MOE_NO_PAD: bool = False
+    SKIP_IDENTITY_MODEL_JIT: bool = False
+    EMBED_INT8_GROUP: int = 0
+    GMM_V2_TILE_VMEM_FRACTION: float = 1.0
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -352,6 +357,33 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # stage the full tensor on device regardless.
     "MOE_STAGE_WEIGHTS_ON_HOST":
     env_bool("MOE_STAGE_WEIGHTS_ON_HOST", default=False),
+    # W4A16 routed experts: keep the checkpoint's bf16 group scales on the
+    # device instead of widening them to float32. Halves the scale footprint;
+    # gmm_v2 multiplies in the activation dtype either way.
+    "W4A16_MOE_BF16_SCALES":
+    env_bool("W4A16_MOE_BF16_SCALES", default=False),
+    # W4A16 routed experts: do not pad the intermediate dim to a multiple of
+    # 128. gmm1 then runs without the fused activation whenever its output
+    # width is not a multiple of 256, and the activation runs in JAX.
+    "W4A16_MOE_NO_PAD":
+    env_bool("W4A16_MOE_NO_PAD", default=False),
+    # After loading real weights, skip the jitted pass over the model state
+    # when no Qwix quantization is configured. Without Qwix that pass is an
+    # identity, but it can still materialize a second copy of every weight,
+    # which does not fit when the weights fill most of the chip.
+    "SKIP_IDENTITY_MODEL_JIT":
+    env_bool("SKIP_IDENTITY_MODEL_JIT", default=False),
+    # When > 0, a tied token embedding is stored after loading as int8 with
+    # one bf16 scale per this many columns; lookups and the tied LM head
+    # dequantize on the fly. Halves the table (1.38 -> 0.73 GiB for a
+    # 262144 x 2816 vocabulary at 32).
+    "EMBED_INT8_GROUP":
+    lambda: int(os.getenv("EMBED_INT8_GROUP", "0")),
+    # gmm_v2 picks tiles against its full scoped-VMEM limit, and its estimate
+    # leaves out in-kernel temporaries; below 1.0, tiles are chosen against
+    # this fraction of the limit while the compiler keeps the full limit.
+    "GMM_V2_TILE_VMEM_FRACTION":
+    lambda: float(os.getenv("GMM_V2_TILE_VMEM_FRACTION", "1.0")),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

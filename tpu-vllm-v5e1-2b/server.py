@@ -249,7 +249,10 @@ def _vllm_serve_flags(mm_limit: Optional[str] = None) -> str:
         f"--disable_chunked_mm_input "
         f"--max_num_batched_tokens {MAX_NUM_BATCHED_TOKENS} "
         f"--limit-mm-per-prompt {mm_limit} "
-        f"--enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4"
+        f"--enable-auto-tool-choice --tool-call-parser gemma4 --reasoning-parser gemma4 "
+        # Ignore the checkpoint's generation_config: its top_k=64 default costs ~14 ms per
+        # token on TPU (45 vs 121 tok/s on v5e-1, 2026-11-03). Clients can still send top_k.
+        f"--generation-config vllm"
     )
 
 

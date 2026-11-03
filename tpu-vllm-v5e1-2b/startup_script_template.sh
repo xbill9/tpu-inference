@@ -117,7 +117,8 @@ echo 'Executing command: sudo docker run --name vllm-gemma4 --privileged --net=h
   --limit-mm-per-prompt "$VLLM_LIMIT_MM_PER_PROMPT" \
   --enable-auto-tool-choice \
   --tool-call-parser gemma4 \
-  --reasoning-parser gemma4'
+  --reasoning-parser gemma4 \
+  --generation-config vllm'
 
 sudo docker run --name vllm-gemma4 --privileged --net=host -d \
   -v /dev/shm:/dev/shm --shm-size 10gb \
@@ -131,7 +132,8 @@ sudo docker run --name vllm-gemma4 --privileged --net=host -d \
   --limit-mm-per-prompt "$VLLM_LIMIT_MM_PER_PROMPT" \
   --enable-auto-tool-choice \
   --tool-call-parser gemma4 \
-  --reasoning-parser gemma4
+  --reasoning-parser gemma4 \
+  --generation-config vllm
 
 if [ $? -ne 0 ]; then
   echo "ERROR: Docker run command failed. Check parameters and image."

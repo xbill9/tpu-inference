@@ -1,0 +1,13 @@
+# Python packages server.py (the MCP server) imports. chat_ui.py is standard-library only.
+# Floors are the versions this rig was verified with on 2026-11-07 (Python 3.14.7).
+#
+#   python3 -m pip install -r requirements.txt
+#
+# mcp must be 2.x: server.py imports mcp.server.mcpserver, which mcp 1.x does not have.
+# google-cloud-secret-manager is what server.get_secret() uses to read the hf-token secret;
+# without it server.py fails at import and the MCP client reports only "Connection closed".
+mcp>=2.2.0,<3
+httpx>=0.28.1
+openai>=3.8.0
+python-dotenv>=1.2.3
+google-cloud-secret-manager>=2.32.0

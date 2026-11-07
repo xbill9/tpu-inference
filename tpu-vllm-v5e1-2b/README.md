@@ -4,6 +4,12 @@ Gemma 4 E2B (`google/gemma-4-E2B-it`) served by vLLM on one Cloud TPU v5e chip (
 
 #### Start it up
 
+**0. Install the server's packages** once per interpreter. A missing one makes `server.py` fail at import, and the MCP client shows only "Connection closed":
+
+```bash
+python3 -m pip install -r ~/tpu-inference/tpu-vllm-v5e1-2b/requirements.txt
+```
+
 **1. Create the TPU.** The MCP tool `create_tpu_queued_resource` creates a 4-hour flex-start TPU. For a different limit, render the same startup script and call gcloud directly (2 hours here):
 
 ```bash
